@@ -1,18 +1,4 @@
 services:
-  postgres:
-    image: postgres:18
-    environment:
-      POSTGRES_USER: leadfactory
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-leadfactory}
-      POSTGRES_DB: leadfactory
-    volumes:
-      - postgres-data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U leadfactory -d leadfactory"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   redis:
     image: redis:8
     command: ["redis-server", "--appendonly", "yes"]
@@ -32,10 +18,8 @@ services:
       APP_ROLE: api
       RUN_MIGRATIONS: auto
       API_PORT: 4000
-      DATABASE_URL: postgresql://leadfactory:${POSTGRES_PASSWORD:-leadfactory}@postgres:5432/leadfactory
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in Coolify}"
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
@@ -61,10 +45,8 @@ services:
     environment:
       APP_ROLE: worker-browser
       RUN_MIGRATIONS: "0"
-      DATABASE_URL: postgresql://leadfactory:${POSTGRES_PASSWORD:-leadfactory}@postgres:5432/leadfactory
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in Coolify}"
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     shm_size: "2gb"
@@ -82,16 +64,13 @@ services:
     environment:
       APP_ROLE: worker-analysis
       RUN_MIGRATIONS: "0"
-      DATABASE_URL: postgresql://leadfactory:${POSTGRES_PASSWORD:-leadfactory}@postgres:5432/leadfactory
+      DATABASE_URL: "${DATABASE_URL:?Set DATABASE_URL in Coolify}"
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
       - app-data:/app/data
 
 volumes:
-  postgres-data:
   redis-data:
   app-data:

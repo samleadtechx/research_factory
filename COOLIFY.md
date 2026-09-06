@@ -11,16 +11,17 @@ Expose only the dashboard service unless you want the API public:
 - `dashboard` port `3000`
 - `api` port `4000` can stay internal because the dashboard proxies `/api/*`
 
-Set this environment variable in Coolify:
+Create or attach a Postgres database in Coolify, then set this environment
+variable on the application:
 
 ```env
-POSTGRES_PASSWORD=change-this-password
+DATABASE_URL=postgresql://...
 ```
 
-The Compose file turns that into each service's `DATABASE_URL`. Runtime values
-such as Redis URL, local LLM endpoint/model, storage path, server usage percent,
-browser cap, Qwen concurrency, campaign timeouts, page limits, and retry counts
-are managed from the dashboard Settings panel or through the MCP tools.
+Runtime values such as Redis URL, local LLM endpoint/model, storage path, server
+usage percent, browser cap, Qwen concurrency, campaign timeouts, page limits, and
+retry counts are managed from the dashboard Settings panel or through the MCP
+tools.
 
 The API container runs Prisma migrations automatically on boot:
 
