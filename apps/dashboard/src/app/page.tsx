@@ -292,7 +292,8 @@ const emptySavedProviderSummary: ProviderListSummary = {
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
-const workspacePath = "/Users/bizrate/Documents/ChatGPT/Research_factory";
+const mcpNpxPackage = "github:samleadtechx/research_factory#main";
+const mcpCommandName = "lead-research-factory-mcp";
 const defaultPublicAppUrl = "http://localhost:3000";
 const publicAppUrlStorageKey = "leadfactory.publicAppUrl";
 
@@ -301,8 +302,8 @@ function buildMcpConfig(mcpApiBaseUrl: string): string {
     {
       mcpServers: {
         "lead-research-factory": {
-          command: "/bin/bash",
-          args: [`${workspacePath}/scripts/start-mcp.sh`],
+          command: "npx",
+          args: ["-y", "--package", mcpNpxPackage, mcpCommandName],
           env: {
             API_BASE_URL: mcpApiBaseUrl
           }
@@ -383,7 +384,7 @@ Currently wired MCP tools:
 App endpoints:
 - Dashboard: ${publicAppUrl}
 - API base: ${mcpApiBaseUrl}
-- MCP stdio launcher: ${workspacePath}/scripts/start-mcp.sh`;
+- MCP command: npx -y --package ${mcpNpxPackage} ${mcpCommandName}`;
 }
 
 function buildAllMcpInstructions(mcpConfig: string, codexInstructions: string): string {

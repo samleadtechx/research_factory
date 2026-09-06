@@ -7,6 +7,16 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(zod@4.4.3)
+      tsx:
+        specifier: ^4.20.6
+        version: 4.23.12
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@leadfactory/proxy-manager':
         specifier: workspace:*
@@ -17,9 +27,6 @@ importers:
       '@types/node':
         specifier: ^24.10.1
         version: 24.13.3
-      tsx:
-        specifier: ^4.20.6
-        version: 4.23.12
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

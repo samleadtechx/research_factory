@@ -38,6 +38,27 @@ bash scripts/status.sh
 ## MCP
 
 Copy the MCP config and Codex instructions from the dashboard Settings section.
+The default config uses `npx`, so Codex does not need this repo cloned on the
+same machine:
+
+```json
+{
+  "mcpServers": {
+    "lead-research-factory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "--package",
+        "github:samleadtechx/research_factory#main",
+        "lead-research-factory-mcp"
+      ],
+      "env": {
+        "API_BASE_URL": "https://factory.leadtechx.com/api"
+      }
+    }
+  }
+}
+```
 
 Main tools:
 

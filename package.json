@@ -4,6 +4,14 @@
   "private": true,
   "packageManager": "pnpm@11.19.0",
   "type": "module",
+  "bin": {
+    "lead-research-factory-mcp": "./bin/lead-research-factory-mcp.js"
+  },
+  "files": [
+    "bin/lead-research-factory-mcp.js",
+    "apps/mcp-server/src/index.ts",
+    "README.md"
+  ],
   "scripts": {
     "build": "pnpm -r build",
     "dev": "pnpm -r --parallel dev",
@@ -24,11 +32,15 @@
     "db:migrate:deploy": "pnpm --filter @leadfactory/database prisma:migrate:deploy",
     "db:push": "pnpm --filter @leadfactory/database prisma:push"
   },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "tsx": "^4.20.6",
+    "zod": "^4.4.3"
+  },
   "devDependencies": {
     "@leadfactory/proxy-manager": "workspace:*",
     "@leadfactory/scoring": "workspace:*",
     "@types/node": "^24.10.1",
-    "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^4.0.14"
   }
