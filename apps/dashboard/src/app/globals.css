@@ -307,6 +307,16 @@ input[type="range"] {
   color: var(--green);
 }
 
+.statusBadge.active {
+  background: #e8f5ee;
+  color: var(--green);
+}
+
+.statusBadge.trial {
+  background: #eef4ff;
+  color: var(--blue);
+}
+
 .statusBadge.paused {
   background: #fff5e8;
   color: var(--amber);
@@ -318,7 +328,8 @@ input[type="range"] {
 }
 
 .statusBadge.failed,
-.statusBadge.cancelled {
+.statusBadge.cancelled,
+.statusBadge.disabled {
   background: #fff0ee;
   color: var(--red);
 }
@@ -418,6 +429,87 @@ input[type="range"] {
   border-radius: 8px;
   margin-bottom: 16px;
   padding: 14px;
+}
+
+.providerPanel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  padding: 14px;
+}
+
+.providerSummaryGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
+.providerTableWrap {
+  overflow-x: auto;
+}
+
+.providerTable {
+  min-width: 920px;
+}
+
+.providerDomains {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 260px;
+}
+
+.providerDomains span {
+  background: #f1f5f9;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 3px 7px;
+}
+
+.providerRuns {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.providerRuns span:first-child {
+  white-space: nowrap;
+}
+
+.providerWarning {
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.providerTypeBadge {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.providerTypeBadge.discovery {
+  background: #eef4ff;
+  color: var(--blue);
+}
+
+.providerTypeBadge.enrichment {
+  background: #e8f5ee;
+  color: var(--green);
+}
+
+.providerTypeBadge.emailverify {
+  background: #fff5e8;
+  color: var(--amber);
 }
 
 .proxyUploadGrid {
@@ -700,6 +792,7 @@ th {
 
   .hardwareGrid,
   .moduleGrid,
+  .providerSummaryGrid,
   .proxyUploadGrid {
     grid-template-columns: 1fr;
   }

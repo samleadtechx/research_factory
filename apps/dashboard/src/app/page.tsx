@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   Cpu,
+  Database,
   Download,
   Eye,
   HardDrive,
@@ -140,6 +141,75 @@ type ProxyListResponse = {
   };
 };
 
+type ProviderStatus = "trial" | "active" | "disabled";
+
+type SourceRecipeSummary = {
+  id: string;
+  campaignId?: string | null;
+  generatedFromCampaignId?: string;
+  name: string;
+  version: string;
+  status: ProviderStatus;
+  supportedDomains: string[];
+  description: string;
+  discoveryQueries: string[];
+  seedUrls: string[];
+  steps: Array<{
+    action: string;
+    selector?: string;
+    value?: string;
+    limit?: number;
+  }>;
+  successCount: number;
+  failureCount: number;
+  updatedAt: string;
+};
+
+type SavedProviderSummary = {
+  id: string;
+  campaignId?: string | null;
+  generatedFromCampaignId?: string;
+  name: string;
+  version: string;
+  status: ProviderStatus;
+  supportedDomains: string[];
+  description: string;
+  kind: string;
+  runWhen?: string;
+  rateLimitPerMinute?: number;
+  requiredEnvVars: string[];
+  missingEnvVars: string[];
+  successCount: number;
+  failureCount: number;
+  lastUsedAt?: string | null;
+  updatedAt: string;
+};
+
+type ProviderListSummary = {
+  total: number;
+  active: number;
+  trial: number;
+  disabled: number;
+  successes: number;
+  failures: number;
+};
+
+type SourceRecipeListResponse = {
+  recipes: SourceRecipeSummary[];
+  summary: ProviderListSummary;
+};
+
+type SavedProviderListResponse = {
+  providers: SavedProviderSummary[];
+  summary: ProviderListSummary;
+};
+
+type DataProviderRow =
+  | ({ type: "Discovery"; mode: string } & SourceRecipeSummary)
+  | ({ type: "Enrichment" | "Email Verify"; mode: string } & SavedProviderSummary);
+
+type ProviderEndpoint = "source-recipes" | "enrichment-providers" | "email-verification-providers";
+
 const emptyCampaignSummary: CampaignListResponse["summary"] = {
   total: 0,
   queued: 0,
@@ -149,6 +219,24 @@ const emptyCampaignSummary: CampaignListResponse["summary"] = {
   failed: 0,
   rankedLeads: 0,
   errors: 0
+};
+
+const emptySourceRecipeSummary: SourceRecipeListResponse["summary"] = {
+  total: 0,
+  active: 0,
+  trial: 0,
+  disabled: 0,
+  successes: 0,
+  failures: 0
+};
+
+const emptySavedProviderSummary: ProviderListSummary = {
+  total: 0,
+  active: 0,
+  trial: 0,
+  disabled: 0,
+  successes: 0,
+  failures: 0
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
@@ -178,11 +266,42 @@ Normal workflow:
 1. Check system_stats before creating a campaign.
 2. Create campaigns from the user's ICP prompt with create_campaign.
 3. Use strict evidence. Unknown is better than guessed.
-4. Inspect leads, evidence, and weak fields before presenting recommendations.
-5. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
+4. Inspect reusable providers with list_source_recipes, list_enrichment_providers, and list_email_verification_providers before creating new ones.
+5. When a source needs custom browser handling, start Camoufox with start_debug_browser and inspect it with debug_browser_snapshot/open/click/type/extract/screenshot.
+6. Convert the debug trail into a source recipe draft with debug_browser_recipe_draft, then save it with create_source_recipe.
+7. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Keep API keys in env vars and reference them as {env:VAR_NAME}.
+8. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
+9. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
+10. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
+11. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
 
 Currently wired MCP tools:
 - create_campaign
+- create_source_recipe
+- list_source_recipes
+- get_source_recipe
+- activate_source_recipe
+- disable_source_recipe
+- create_enrichment_provider
+- list_enrichment_providers
+- get_enrichment_provider
+- activate_enrichment_provider
+- disable_enrichment_provider
+- create_email_verification_provider
+- list_email_verification_providers
+- get_email_verification_provider
+- activate_email_verification_provider
+- disable_email_verification_provider
+- start_debug_browser
+- list_debug_browsers
+- debug_browser_snapshot
+- debug_browser_open
+- debug_browser_click
+- debug_browser_type
+- debug_browser_extract
+- debug_browser_screenshot
+- debug_browser_recipe_draft
+- close_debug_browser
 - system_stats
 - parse_proxies
 - upload_proxies
@@ -228,6 +347,17 @@ export default function DashboardPage() {
   const [proxyResult, setProxyResult] = useState<string | null>(null);
   const [proxyError, setProxyError] = useState<string | null>(null);
   const [isUploadingProxies, setIsUploadingProxies] = useState(false);
+  const [sourceRecipes, setSourceRecipes] = useState<SourceRecipeSummary[]>([]);
+  const [sourceRecipeSummary, setSourceRecipeSummary] =
+    useState<SourceRecipeListResponse["summary"]>(emptySourceRecipeSummary);
+  const [enrichmentProviders, setEnrichmentProviders] = useState<SavedProviderSummary[]>([]);
+  const [enrichmentProviderSummary, setEnrichmentProviderSummary] =
+    useState<ProviderListSummary>(emptySavedProviderSummary);
+  const [emailVerificationProviders, setEmailVerificationProviders] = useState<SavedProviderSummary[]>([]);
+  const [emailVerificationProviderSummary, setEmailVerificationProviderSummary] =
+    useState<ProviderListSummary>(emptySavedProviderSummary);
+  const [sourceRecipeError, setSourceRecipeError] = useState<string | null>(null);
+  const [isRefreshingSourceRecipes, setIsRefreshingSourceRecipes] = useState(false);
 
   const moduleStatus = useMemo(() => {
     const byKey = new Map((health?.modules ?? []).map((module) => [module.key, module]));
@@ -243,12 +373,38 @@ export default function DashboardPage() {
   const browserRuntimeReady =
     moduleStatus.camoufox?.status === "healthy" && moduleStatus.playwright?.status === "healthy";
 
+  const dataProviderRows = useMemo<DataProviderRow[]>(
+    () => [
+      ...sourceRecipes.map((recipe) => ({
+        ...recipe,
+        type: "Discovery" as const,
+        mode: `${recipe.steps.length} steps`
+      })),
+      ...enrichmentProviders.map((provider) => ({
+        ...provider,
+        type: "Enrichment" as const,
+        mode: provider.runWhen ?? provider.kind
+      })),
+      ...emailVerificationProviders.map((provider) => ({
+        ...provider,
+        type: "Email Verify" as const,
+        mode: `${provider.rateLimitPerMinute ?? "-"} rpm`
+      }))
+    ],
+    [sourceRecipes, enrichmentProviders, emailVerificationProviders]
+  );
+
+  const dataProviderSummary = useMemo(
+    () => combineProviderSummaries([sourceRecipeSummary, enrichmentProviderSummary, emailVerificationProviderSummary]),
+    [sourceRecipeSummary, enrichmentProviderSummary, emailVerificationProviderSummary]
+  );
+
   useEffect(() => {
     void refreshAll();
   }, []);
 
   async function refreshAll() {
-    await Promise.all([refreshCampaigns(), refreshHealth(), refreshProxies()]);
+    await Promise.all([refreshCampaigns(), refreshHealth(), refreshProxies(), refreshSourceRecipes()]);
   }
 
   async function refreshCampaigns() {
@@ -328,6 +484,48 @@ export default function DashboardPage() {
     } catch (caught) {
       setProxyError(caught instanceof Error ? caught.message : "Proxy list failed to load");
     }
+  }
+
+  async function refreshSourceRecipes() {
+    setIsRefreshingSourceRecipes(true);
+    setSourceRecipeError(null);
+    try {
+      const [sourceResponse, enrichmentResponse, emailVerificationResponse] = await Promise.all([
+        fetch(`${apiBaseUrl}/source-recipes`),
+        fetch(`${apiBaseUrl}/enrichment-providers`),
+        fetch(`${apiBaseUrl}/email-verification-providers`)
+      ]);
+      if (!sourceResponse.ok) throw new Error(await sourceResponse.text());
+      if (!enrichmentResponse.ok) throw new Error(await enrichmentResponse.text());
+      if (!emailVerificationResponse.ok) throw new Error(await emailVerificationResponse.text());
+      const sourcePayload = (await sourceResponse.json()) as SourceRecipeListResponse;
+      const enrichmentPayload = (await enrichmentResponse.json()) as SavedProviderListResponse;
+      const emailVerificationPayload = (await emailVerificationResponse.json()) as SavedProviderListResponse;
+      setSourceRecipes(sourcePayload.recipes);
+      setSourceRecipeSummary(sourcePayload.summary);
+      setEnrichmentProviders(enrichmentPayload.providers);
+      setEnrichmentProviderSummary(enrichmentPayload.summary);
+      setEmailVerificationProviders(emailVerificationPayload.providers);
+      setEmailVerificationProviderSummary(emailVerificationPayload.summary);
+    } catch (caught) {
+      setSourceRecipeError(caught instanceof Error ? caught.message : "Provider list failed to load");
+    } finally {
+      setIsRefreshingSourceRecipes(false);
+    }
+  }
+
+  async function updateSavedProviderStatus(endpoint: ProviderEndpoint, providerId: string, status: ProviderStatus) {
+    setSourceRecipeError(null);
+    const response = await fetch(`${apiBaseUrl}/${endpoint}/${providerId}/status`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status })
+    });
+    if (!response.ok) {
+      setSourceRecipeError(await response.text());
+      return;
+    }
+    await refreshSourceRecipes();
   }
 
   async function uploadProxies() {
@@ -633,6 +831,133 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        <div className="providerPanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Data Providers</h2>
+              <span>
+                {dataProviderSummary.total
+                  ? `${dataProviderSummary.active} active, ${dataProviderSummary.trial} trial, ${dataProviderSummary.disabled} disabled`
+                  : "Providers created through MCP will appear here"}
+              </span>
+            </div>
+            <button className="copyButton" onClick={refreshSourceRecipes} disabled={isRefreshingSourceRecipes}>
+              <RefreshCw size={16} />
+              <span>{isRefreshingSourceRecipes ? "Refreshing" : "Refresh"}</span>
+            </button>
+          </div>
+
+          {sourceRecipeError ? <pre className="error">{sourceRecipeError}</pre> : null}
+
+          <div className="providerSummaryGrid">
+            <HealthMetric
+              icon={<Database size={18} />}
+              label="Discovery"
+              value={String(sourceRecipeSummary.total)}
+              detail={`${sourceRecipeSummary.successes} successful runs`}
+            />
+            <HealthMetric
+              icon={<Activity size={18} />}
+              label="Enrichment"
+              value={String(enrichmentProviderSummary.total)}
+              detail={`${enrichmentProviderSummary.active} active`}
+            />
+            <HealthMetric
+              icon={<Check size={18} />}
+              label="Email Verify"
+              value={String(emailVerificationProviderSummary.total)}
+              detail={`${emailVerificationProviderSummary.active} active`}
+            />
+          </div>
+
+          <div className="providerTableWrap">
+            <table className="providerTable">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Provider</th>
+                  <th>Status</th>
+                  <th>Scope</th>
+                  <th>Domains</th>
+                  <th>Mode</th>
+                  <th>Runs</th>
+                  <th>Updated</th>
+                  <th>Controls</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dataProviderRows.map((provider) => (
+                  <tr key={`${provider.type}-${provider.id}`}>
+                    <td>
+                      <span className={`providerTypeBadge ${provider.type.toLowerCase().replace(/\s+/g, "")}`}>
+                        {provider.type}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="campaignCell">
+                        <strong>{provider.name}</strong>
+                        <span>{providerDescription(provider)}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`statusBadge ${provider.status}`}>{provider.status}</span>
+                    </td>
+                    <td>{provider.campaignId ? "campaign" : "global"}</td>
+                    <td>
+                      <div className="providerDomains">
+                        {provider.supportedDomains.slice(0, 4).map((domain) => (
+                          <span key={domain}>{domain}</span>
+                        ))}
+                        {provider.supportedDomains.length > 4 ? <span>+{provider.supportedDomains.length - 4}</span> : null}
+                        {provider.supportedDomains.length === 0 ? "-" : null}
+                      </div>
+                    </td>
+                    <td>{provider.mode}</td>
+                    <td>
+                      <div className="providerRuns">
+                        <span>
+                          {provider.successCount} ok / {provider.failureCount} fail
+                        </span>
+                        {"missingEnvVars" in provider && provider.missingEnvVars.length ? (
+                          <span className="providerWarning">{provider.missingEnvVars.length} env missing</span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td>{formatDateTime(provider.updatedAt)}</td>
+                    <td>
+                      <div className="rowActions">
+                        <button
+                          className="iconButton smallIconButton"
+                          title="Activate provider"
+                          onClick={() => void updateSavedProviderStatus(providerEndpoint(provider.type), provider.id, "active")}
+                          disabled={provider.status === "active"}
+                        >
+                          <Play size={15} />
+                        </button>
+                        <button
+                          className="iconButton smallIconButton"
+                          title="Disable provider"
+                          onClick={() => void updateSavedProviderStatus(providerEndpoint(provider.type), provider.id, "disabled")}
+                          disabled={provider.status === "disabled"}
+                        >
+                          <Square size={15} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {dataProviderRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={9}>
+                      <div className="emptyState">No reusable data providers saved yet.</div>
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <div className="healthPanel">
           <div className="sectionHeader">
             <div>
@@ -818,6 +1143,38 @@ function formatPeople(people: Person[]): string {
     .slice(0, 6)
     .map((person) => `${person.name}${person.role ? ` (${person.role})` : ""}${person.email ? ` <${person.email}>` : ""}`)
     .join(", ");
+}
+
+function combineProviderSummaries(summaries: ProviderListSummary[]): ProviderListSummary {
+  return summaries.reduce(
+    (combined, summary) => ({
+      total: combined.total + summary.total,
+      active: combined.active + summary.active,
+      trial: combined.trial + summary.trial,
+      disabled: combined.disabled + summary.disabled,
+      successes: combined.successes + summary.successes,
+      failures: combined.failures + summary.failures
+    }),
+    { ...emptySavedProviderSummary }
+  );
+}
+
+function providerDescription(provider: DataProviderRow): string {
+  if (provider.type === "Discovery") {
+    return provider.description || `${provider.discoveryQueries.length} queries, ${provider.seedUrls.length} seed URLs`;
+  }
+  return provider.description || `${provider.kind} provider, ${provider.requiredEnvVars.length} env vars`;
+}
+
+function providerEndpoint(type: DataProviderRow["type"]): ProviderEndpoint {
+  switch (type) {
+    case "Discovery":
+      return "source-recipes";
+    case "Enrichment":
+      return "enrichment-providers";
+    case "Email Verify":
+      return "email-verification-providers";
+  }
 }
 
 function statusLabel(status: ModuleHealth["status"]): string {

@@ -12,6 +12,7 @@ import {
 } from "@leadfactory/queue";
 import { calculateWorkerLimits, probeSystemCapacity } from "@leadfactory/resource-governor";
 import { CampaignPlanSchema, ServerSettingsSchema, type CampaignPlan } from "@leadfactory/schemas";
+import { SourceRecipeConfigSchema, type SourceRecipeConfig, type SourceRecipeStep } from "@leadfactory/source-adapters";
 import { Job, Worker } from "bullmq";
 import "dotenv/config";
 import { chromium, type BrowserContextOptions, type Page } from "playwright";
@@ -29,6 +30,9 @@ type SearchResult = {
   url: string;
   title: string;
   snippet?: string;
+  sourceName?: string;
+  sourceRecipeId?: string;
+  sourceRecipeName?: string;
 };
 
 type PageSnapshot = {
@@ -39,6 +43,23 @@ type PageSnapshot = {
   html: string;
   text: string;
   links: string[];
+};
+
+type RecipeAnchor = {
+  href: string;
+  text: string;
+};
+
+type SourceRecipeRecord = {
+  id: string;
+  campaignId: string | null;
+  name: string;
+  version: string;
+  status: string;
+  recipe: unknown;
+  supportedDomains: string[];
+  successCount: number;
+  failureCount: number;
 };
 
 type SavedPage = {
@@ -183,12 +204,23 @@ async function discoverCandidates(job: Job<BrowserResearchPayload>) {
   const plan = parseCampaignPlan(campaign.plan, campaign.prompt, campaign.name);
   const query = job.data.query ?? buildDiscoveryQuery(plan);
   const target = Math.min(campaign.targetLeadCount ?? 50, Number(process.env.MAX_DISCOVERY_RESULTS ?? 80));
-  const searchResults = await fetchSearchResults({
-    campaignId: campaign.id,
-    query,
-    limit: Math.max(target * 2, 25),
-    proxyStrategy: job.data.proxyStrategy
-  });
+  const discoveryLimit = Math.max(target * 2, 25);
+  const [recipeResults, webSearchResults] = await Promise.all([
+    runActiveSourceRecipes({
+      campaignId: campaign.id,
+      plan,
+      query,
+      limit: discoveryLimit,
+      proxyStrategy: job.data.proxyStrategy
+    }),
+    fetchSearchResults({
+      campaignId: campaign.id,
+      query,
+      limit: discoveryLimit,
+      proxyStrategy: job.data.proxyStrategy
+    })
+  ]);
+  const searchResults = dedupeSearchResults([...recipeResults, ...webSearchResults]);
 
   let discovered = 0;
   for (const result of searchResults.slice(0, target * 2)) {
@@ -239,7 +271,12 @@ async function discoverCandidates(job: Job<BrowserResearchPayload>) {
     }
   });
 
-  return { discovered, totalSearchResults: searchResults.length, query };
+  return {
+    discovered,
+    totalSearchResults: searchResults.length,
+    providerResults: recipeResults.length,
+    query
+  };
 }
 
 async function researchCompany(job: Job<BrowserResearchPayload>) {
@@ -445,6 +482,187 @@ async function fetchSearchResults(params: {
   return result.ok ? result.result : [];
 }
 
+async function runActiveSourceRecipes(params: {
+  campaignId: string;
+  plan: CampaignPlan;
+  query: string;
+  limit: number;
+  proxyStrategy: BrowserResearchPayload["proxyStrategy"];
+}): Promise<SearchResult[]> {
+  const maxRecipes = Number(process.env.MAX_ACTIVE_SOURCE_RECIPES ?? 10);
+  const recipes = await prisma.sourceRecipe.findMany({
+    where: {
+      OR: [
+        { status: "active", campaignId: null },
+        { status: "active", campaignId: params.campaignId },
+        { status: "trial", campaignId: params.campaignId }
+      ]
+    },
+    orderBy: [{ successCount: "desc" }, { updatedAt: "desc" }],
+    take: Math.max(1, maxRecipes)
+  });
+
+  const results: SearchResult[] = [];
+  for (const recipe of recipes) {
+    const parsed = SourceRecipeConfigSchema.safeParse(recipe.recipe);
+    if (!parsed.success) {
+      await markSourceRecipeFailure(recipe, "invalid_recipe");
+      continue;
+    }
+
+    try {
+      const recipeResults = await runSourceRecipe(recipe, parsed.data, params);
+      if (recipeResults.length) {
+        await markSourceRecipeSuccess(recipe);
+        results.push(...recipeResults);
+      } else {
+        await markSourceRecipeFailure(recipe, "no_results");
+      }
+    } catch (error) {
+      await markSourceRecipeFailure(recipe, error instanceof Error ? error.message : "recipe_error");
+    }
+  }
+
+  return dedupeSearchResults(results).slice(0, params.limit);
+}
+
+async function runSourceRecipe(
+  recipe: SourceRecipeRecord,
+  config: SourceRecipeConfig,
+  params: {
+    campaignId: string;
+    plan: CampaignPlan;
+    query: string;
+    limit: number;
+    proxyStrategy: BrowserResearchPayload["proxyStrategy"];
+  }
+): Promise<SearchResult[]> {
+  const results: SearchResult[] = [];
+  const perRecipeLimit = Math.max(1, Math.min(params.limit, Number(process.env.SOURCE_RECIPE_RESULT_LIMIT ?? 60)));
+  const querySpecs = [
+    ...config.discoveryQueries.map((value) => ({ value, limit: perRecipeLimit })),
+    ...config.steps
+      .filter((step) => step.action === "search_web")
+      .map((step) => ({ value: step.value ?? "{query}", limit: step.limit ?? perRecipeLimit }))
+  ];
+
+  for (const spec of querySpecs.slice(0, Number(process.env.SOURCE_RECIPE_MAX_QUERIES ?? 8))) {
+    const query = renderRecipeTemplate(spec.value, params.plan, params.query);
+    if (!query) continue;
+    const found = await fetchSearchResults({
+      campaignId: params.campaignId,
+      query,
+      limit: Math.min(spec.limit, perRecipeLimit),
+      proxyStrategy: params.proxyStrategy
+    });
+    results.push(
+      ...found.map((result) => ({
+        ...result,
+        sourceName: "source_recipe_search",
+        sourceRecipeId: recipe.id,
+        sourceRecipeName: recipe.name
+      }))
+    );
+  }
+
+  const openSpecs = [
+    ...config.seedUrls.map((value) => ({ value, limit: perRecipeLimit })),
+    ...config.steps
+      .filter((step) => step.action === "open_url" && step.value)
+      .map((step) => ({ value: step.value!, limit: step.limit ?? perRecipeLimit }))
+  ];
+
+  for (const spec of openSpecs.slice(0, Number(process.env.SOURCE_RECIPE_MAX_SEEDS ?? 10))) {
+    const url = normalizeInputUrl(renderRecipeTemplate(spec.value, params.plan, params.query));
+    if (!url) continue;
+    const pageResults = await runSourceRecipePage(recipe, config, {
+      campaignId: params.campaignId,
+      url,
+      limit: Math.min(spec.limit, perRecipeLimit),
+      proxyStrategy: params.proxyStrategy
+    });
+    results.push(...pageResults);
+  }
+
+  return dedupeSearchResults(results).slice(0, perRecipeLimit);
+}
+
+async function runSourceRecipePage(
+  recipe: SourceRecipeRecord,
+  config: SourceRecipeConfig,
+  params: {
+    campaignId: string;
+    url: string;
+    limit: number;
+    proxyStrategy: BrowserResearchPayload["proxyStrategy"];
+  }
+): Promise<SearchResult[]> {
+  const pageResult = await withBrowserPage(
+    {
+      campaignId: params.campaignId,
+      url: params.url,
+      sourceName: `source_recipe:${recipe.name}`,
+      proxyStrategy: params.proxyStrategy,
+      maxAttempts: Number(process.env.SOURCE_RECIPE_RETRY_COUNT ?? 2)
+    },
+    async (page) => {
+      const collected = new Map<string, SearchResult>();
+      let snapshot = await navigateAndSnapshot(page, params.url);
+      const pageSteps = config.steps.filter((step) => !["open_url", "search_web"].includes(step.action));
+      const executableSteps: SourceRecipeStep[] = pageSteps.length
+        ? pageSteps
+        : [{ action: "extract_links", limit: params.limit }];
+
+      for (const step of executableSteps) {
+        if (collected.size >= params.limit) break;
+
+        if (step.action === "click_selector" && step.selector) {
+          const clicked = await clickRecipeSelector(page, step.selector);
+          if (clicked) snapshot = await captureCurrentSnapshot(page, page.url());
+          continue;
+        }
+
+        if (step.action === "extract_text" || step.action === "extract_structured_fields") {
+          addRecipeSnapshotResult(collected, recipe, snapshot);
+          continue;
+        }
+
+        if (step.action === "extract_links") {
+          const anchors = await extractRecipeAnchors(page, step.selector);
+          addRecipeAnchorResults({
+            collected,
+            recipe,
+            snapshot,
+            anchors,
+            limit: Math.min(step.limit ?? params.limit, params.limit)
+          });
+          continue;
+        }
+
+        if (step.action === "paginate") {
+          const pages = Math.min(step.limit ?? 3, Number(process.env.SOURCE_RECIPE_MAX_PAGES ?? 8));
+          for (let pageIndex = 0; pageIndex < pages && collected.size < params.limit; pageIndex += 1) {
+            const clicked = await clickRecipeSelector(page, step.selector ?? 'a[rel="next"]');
+            if (!clicked) break;
+            snapshot = await captureCurrentSnapshot(page, page.url());
+            addRecipeAnchorResults({
+              collected,
+              recipe,
+              snapshot,
+              anchors: await extractRecipeAnchors(page),
+              limit: params.limit
+            });
+          }
+        }
+      }
+
+      return [...collected.values()].slice(0, params.limit);
+    }
+  );
+
+  return pageResult.ok ? pageResult.result : [];
+}
+
 async function withBrowserPage<T>(
   options: {
     campaignId: string;
@@ -515,6 +733,10 @@ async function navigateAndSnapshot(page: Page, url: string): Promise<PageSnapsho
   });
   await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => undefined);
 
+  return captureCurrentSnapshot(page, url, response?.status());
+}
+
+async function captureCurrentSnapshot(page: Page, requestedUrl: string, statusCode?: number): Promise<PageSnapshot> {
   const html = await page.content();
   const text = normalizeWhitespace(
     await page
@@ -523,7 +745,6 @@ async function navigateAndSnapshot(page: Page, url: string): Promise<PageSnapsho
       .catch(() => stripHtml(html))
   );
   const title = normalizeWhitespace(await page.title().catch(() => ""));
-  const statusCode = response?.status();
   const blockReason = detectBlockReason(text, html, statusCode);
   if (blockReason) throw new PageBlockedError(blockReason);
 
@@ -534,7 +755,7 @@ async function navigateAndSnapshot(page: Page, url: string): Promise<PageSnapsho
   );
 
   return {
-    requestedUrl: url,
+    requestedUrl,
     finalUrl: page.url(),
     statusCode,
     title,
@@ -542,6 +763,191 @@ async function navigateAndSnapshot(page: Page, url: string): Promise<PageSnapsho
     text,
     links
   };
+}
+
+async function markSourceRecipeSuccess(recipe: SourceRecipeRecord) {
+  const autoActivateAfter = Number(process.env.SOURCE_RECIPE_AUTO_ACTIVATE_AFTER ?? 3);
+  const shouldActivate =
+    recipe.status === "trial" && autoActivateAfter > 0 && recipe.successCount + 1 >= autoActivateAfter;
+
+  await prisma.sourceRecipe.update({
+    where: { id: recipe.id },
+    data: {
+      successCount: { increment: 1 },
+      ...(shouldActivate ? { status: "active" } : {})
+    }
+  });
+}
+
+async function markSourceRecipeFailure(recipe: SourceRecipeRecord, reason: string) {
+  const autoDisableAfter = Number(process.env.SOURCE_RECIPE_AUTO_DISABLE_AFTER ?? 10);
+  const shouldDisable =
+    recipe.status !== "disabled" &&
+    recipe.successCount === 0 &&
+    autoDisableAfter > 0 &&
+    recipe.failureCount + 1 >= autoDisableAfter;
+
+  await prisma.sourceRecipe.update({
+    where: { id: recipe.id },
+    data: {
+      failureCount: { increment: 1 },
+      ...(shouldDisable ? { status: "disabled" } : {})
+    }
+  });
+
+  console.warn(
+    JSON.stringify({
+      service: "worker-browser",
+      sourceRecipeId: recipe.id,
+      sourceRecipeName: recipe.name,
+      status: shouldDisable ? "disabled" : "failed",
+      reason
+    })
+  );
+}
+
+function renderRecipeTemplate(template: string, plan: CampaignPlan, fallbackQuery: string): string {
+  const values: Record<string, string> = {
+    campaignName: plan.campaignName,
+    geography: plan.geography.join(" "),
+    icp: plan.icpDescription,
+    negativeFilters: plan.negativeFilters.join(" "),
+    query: fallbackQuery,
+    requiredEvidence: plan.requiredEvidenceFields.join(" "),
+    signals: plan.positiveSignals.join(" ")
+  };
+
+  return normalizeWhitespace(template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key: string) => values[key] ?? ""));
+}
+
+async function clickRecipeSelector(page: Page, selector: string): Promise<boolean> {
+  try {
+    const locator = page.locator(selector).first();
+    await locator.waitFor({ state: "visible", timeout: 6000 });
+    await locator.click({ timeout: 6000 });
+    await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => undefined);
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function extractRecipeAnchors(page: Page, selector?: string): Promise<RecipeAnchor[]> {
+  return page.evaluate((rootSelector) => {
+    const roots = rootSelector
+      ? Array.from(document.querySelectorAll(rootSelector))
+      : Array.from(document.querySelectorAll("a"));
+    const anchors = roots.flatMap((root) =>
+      root instanceof HTMLAnchorElement ? [root] : Array.from(root.querySelectorAll("a"))
+    );
+
+    return anchors
+      .map((anchor) => ({
+        href: anchor.href,
+        text: anchor.textContent?.trim() ?? ""
+      }))
+      .filter((anchor) => Boolean(anchor.href));
+  }, selector ?? null);
+}
+
+function addRecipeAnchorResults(params: {
+  collected: Map<string, SearchResult>;
+  recipe: SourceRecipeRecord;
+  snapshot: PageSnapshot;
+  anchors: RecipeAnchor[];
+  limit: number;
+}) {
+  for (const anchor of params.anchors) {
+    if (params.collected.size >= params.limit) break;
+    const normalized = normalizeInputUrl(anchor.href);
+    if (!normalized || !isUsefulPublicUrl(normalized)) continue;
+    if (!looksLikeRecipeCandidateLink(normalized, anchor.text, params.snapshot, params.recipe.supportedDomains)) continue;
+
+    const key = canonicalizeUrl(normalized);
+    if (params.collected.has(key)) continue;
+    params.collected.set(key, {
+      url: normalized,
+      title: recipeResultTitle(anchor.text, params.snapshot.title, normalized),
+      snippet: `Found by ${params.recipe.name}@${params.recipe.version} from ${params.snapshot.title || params.snapshot.finalUrl}`,
+      sourceName: "source_recipe",
+      sourceRecipeId: params.recipe.id,
+      sourceRecipeName: params.recipe.name
+    });
+  }
+}
+
+function addRecipeSnapshotResult(
+  collected: Map<string, SearchResult>,
+  recipe: SourceRecipeRecord,
+  snapshot: PageSnapshot
+) {
+  if (!isUsefulPublicUrl(snapshot.finalUrl)) return;
+  const key = canonicalizeUrl(snapshot.finalUrl);
+  if (collected.has(key)) return;
+  collected.set(key, {
+    url: snapshot.finalUrl,
+    title: snapshot.title || recipe.name,
+    snippet: snapshot.text.slice(0, 280),
+    sourceName: "source_recipe",
+    sourceRecipeId: recipe.id,
+    sourceRecipeName: recipe.name
+  });
+}
+
+function looksLikeRecipeCandidateLink(
+  url: string,
+  anchorText: string,
+  snapshot: PageSnapshot,
+  supportedDomains: string[]
+): boolean {
+  try {
+    const parsed = new URL(url);
+    const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    const sourceDomain = domainFromUrl(snapshot.finalUrl);
+    const pathValue = `${parsed.pathname} ${parsed.search}`.toLowerCase();
+
+    if (/login|sign-?in|privacy|terms|cookie|advertis|subscribe|help|support/i.test(pathValue)) return false;
+    if (sourceDomain && domain === sourceDomain) return true;
+    if (isBusinessProfileDomain(domain)) return true;
+    if (supportedDomains.some((supported) => domainMatches(domain, supported))) return true;
+
+    const combined = `${anchorText} ${url}`.toLowerCase();
+    return /\b(business|company|contact|profile|owner|manager|team|website)\b/.test(combined);
+  } catch {
+    return false;
+  }
+}
+
+function recipeResultTitle(anchorText: string, pageTitle: string, url: string): string {
+  const cleanAnchor = cleanSearchTitle(anchorText);
+  if (cleanAnchor.length >= 3 && !isGenericAnchorTitle(cleanAnchor)) return cleanAnchor.slice(0, 160);
+  const cleanPageTitle = cleanSearchTitle(pageTitle);
+  if (cleanPageTitle.length >= 3) return cleanPageTitle.slice(0, 160);
+  const domain = domainFromUrl(url);
+  return domain ? inferCompanyName("", domain) : url.slice(0, 160);
+}
+
+function isGenericAnchorTitle(value: string): boolean {
+  return /^(about|back|click here|contact|details|email|home|learn more|more|next|open|previous|read more|view|website)$/i.test(
+    value.trim()
+  );
+}
+
+function domainMatches(domain: string, supportedDomain: string): boolean {
+  const normalized = supportedDomain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  return Boolean(normalized) && (domain === normalized || domain.endsWith(`.${normalized}`));
+}
+
+function dedupeSearchResults(results: SearchResult[]): SearchResult[] {
+  const deduped = new Map<string, SearchResult>();
+  for (const result of results) {
+    const normalized = normalizeInputUrl(result.url);
+    if (!normalized || !isUsefulPublicUrl(normalized)) continue;
+    const key = canonicalizeUrl(normalized);
+    if (!deduped.has(key)) deduped.set(key, { ...result, url: normalized });
+  }
+  return [...deduped.values()];
 }
 
 async function saveSnapshot(params: {
@@ -647,18 +1053,23 @@ async function saveSnapshot(params: {
 }
 
 async function upsertCandidateFromSearch(campaignId: string, result: SearchResult) {
-  const domain = domainFromUrl(result.url);
-  if (!domain) return null;
+  const sourceDomain = domainFromUrl(result.url);
+  if (!sourceDomain) return null;
 
-  const companyName = inferCompanyName(result.title, domain);
+  const profileResult = isBusinessProfileDomain(sourceDomain);
+  const companyDomain = profileResult ? null : sourceDomain;
+  const companyName = inferCompanyName(result.title, sourceDomain);
   const existingCompany = await prisma.company.findFirst({
     where: {
-      OR: [{ domain }, { website: result.url }]
+      OR: [{ website: result.url }, ...(companyDomain ? [{ domain: companyDomain }] : [])]
     }
   });
   const metadata = {
     discovery: {
-      source: "duckduckgo",
+      source: result.sourceName ?? "duckduckgo",
+      sourceDomain,
+      sourceRecipeId: result.sourceRecipeId,
+      sourceRecipeName: result.sourceRecipeName,
       title: result.title,
       snippet: result.snippet,
       url: result.url
@@ -670,7 +1081,7 @@ async function upsertCandidateFromSearch(campaignId: string, result: SearchResul
       data: {
         companyName,
         normalizedName: normalizeCompanyName(companyName),
-        domain,
+        domain: companyDomain,
         website: result.url,
         metadata
       }
@@ -683,6 +1094,7 @@ async function upsertCandidateFromSearch(campaignId: string, result: SearchResul
         companyName: existingCompany.companyName || companyName,
         normalizedName: existingCompany.normalizedName ?? normalizeCompanyName(companyName),
         website: existingCompany.website ?? result.url,
+        domain: existingCompany.domain ?? companyDomain,
         metadata
       }
     });
@@ -709,7 +1121,7 @@ async function upsertCandidateFromSearch(campaignId: string, result: SearchResul
     companyId: company.id,
     leadId: lead.id,
     field: "search_result",
-    sourceType: "search_result",
+    sourceType: result.sourceRecipeId ? "source_recipe_result" : "search_result",
     url: result.url,
     finalUrl: result.url,
     quote: result.title
@@ -1061,11 +1473,15 @@ function keywordWeight(value: string): number {
 
 function inferSourceType(url: string): string {
   const domain = domainFromUrl(url) ?? "";
-  if (businessProfileDomains.some((known) => domain === known || domain.endsWith(`.${known}`))) {
+  if (isBusinessProfileDomain(domain)) {
     return "business_profile";
   }
   if (/career|jobs|employment/i.test(url)) return "careers_page";
   return "company_website";
+}
+
+function isBusinessProfileDomain(domain: string): boolean {
+  return businessProfileDomains.some((known) => domain === known || domain.endsWith(`.${known}`));
 }
 
 function detectBlockReason(text: string, html: string, statusCode?: number): string | null {

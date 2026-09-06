@@ -53,12 +53,18 @@ importers:
       '@leadfactory/schemas':
         specifier: workspace:*
         version: link:../../packages/schemas
+      '@leadfactory/source-adapters':
+        specifier: workspace:*
+        version: link:../../packages/source-adapters
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
       fastify:
         specifier: ^5.12.1
         version: 5.12.1
+      playwright:
+        specifier: 1.60.0
+        version: 1.60.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -137,6 +143,9 @@ importers:
       '@leadfactory/scoring':
         specifier: workspace:*
         version: link:../../packages/scoring
+      '@leadfactory/source-adapters':
+        specifier: workspace:*
+        version: link:../../packages/source-adapters
       bullmq:
         specifier: ^5.66.0
         version: 5.81.3
@@ -1912,9 +1921,19 @@ packages:
   pkg-types@2.3.1:
     resolution: {integrity: sha512-y+ichcgc2LrADuhLNAx8DFjVfgz91pRxfZdI3UDhxHvcVEZsenLO+7XaU5vOp0u/7V/wZ+plyuQxtrDlZJ+yeg==}
 
+  playwright-core@1.60.0:
+    resolution: {integrity: sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==}
+    engines: {node: '>=18'}
+    hasBin: true
+
   playwright-core@1.62.1:
     resolution: {integrity: sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==}
     engines: {node: '>=20'}
+    hasBin: true
+
+  playwright@1.60.0:
+    resolution: {integrity: sha512-hheHdokM8cdqCb0lcE3s+zT4t4W+vvjpGxsZlDnikarzx8tSzMebh3UiFtgqwFwnTnjYQcsyMF8ei2mCO/tpeA==}
+    engines: {node: '>=18'}
     hasBin: true
 
   playwright@1.62.1:
@@ -3824,7 +3843,15 @@ snapshots:
       exsolve: 1.1.1
       pathe: 2.0.3
 
+  playwright-core@1.60.0: {}
+
   playwright-core@1.62.1: {}
+
+  playwright@1.60.0:
+    dependencies:
+      playwright-core: 1.60.0
+    optionalDependencies:
+      fsevents: 2.3.2
 
   playwright@1.62.1:
     dependencies:

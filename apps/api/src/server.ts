@@ -2,6 +2,16 @@ import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import { planCampaign } from "@leadfactory/campaign-planner";
 import { prisma, Prisma } from "@leadfactory/database";
+import {
+  createDebugBrowserController,
+  DebugBrowserClickInputSchema,
+  DebugBrowserExtractInputSchema,
+  DebugBrowserOpenInputSchema,
+  DebugBrowserScreenshotInputSchema,
+  DebugBrowserSessionIdSchema,
+  DebugBrowserTypeInputSchema,
+  StartDebugBrowserInputSchema
+} from "./debugBrowser.js";
 import { OpenAICompatibleLLMProvider } from "@leadfactory/llm";
 import { parseProxyText } from "@leadfactory/proxy-manager";
 import { createQueue, queueNames, type BrowserResearchPayload } from "@leadfactory/queue";
@@ -17,8 +27,18 @@ import {
   ServerSettingsSchema,
   type CampaignPlan
 } from "@leadfactory/schemas";
+import {
+  CreateEmailVerificationProviderInputSchema,
+  CreateEnrichmentProviderInputSchema,
+  CreateSourceRecipeInputSchema,
+  EmailVerificationProviderConfigSchema,
+  EnrichmentProviderConfigSchema,
+  SourceRecipeConfigSchema,
+  UpdateSavedProviderStatusInputSchema,
+  UpdateSourceRecipeStatusInputSchema
+} from "@leadfactory/source-adapters";
 import "dotenv/config";
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import { ZodError } from "zod";
 
 const api = Fastify({
@@ -27,9 +47,17 @@ const api = Fastify({
   }
 });
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
+const debugBrowsers = createDebugBrowserController({
+  rootDir,
+  storageDir: process.env.APP_STORAGE_DIR ?? `${rootDir}/data`
+});
 
 await api.register(cors, {
   origin: true
+});
+
+api.addHook("onClose", async () => {
+  await debugBrowsers.closeAll();
 });
 
 api.setErrorHandler((error, _request, reply) => {
@@ -82,6 +110,331 @@ api.get("/system/health", async () => {
     localLlmBaseUrl: process.env.LOCAL_LLM_BASE_URL ?? "http://73.72.215.253:11434/v1",
     rootDir
   });
+});
+
+api.get("/debug-browser/sessions", async () => debugBrowsers.list());
+
+api.post("/debug-browser/sessions", async (request) => {
+  return debugBrowsers.start(StartDebugBrowserInputSchema.parse(request.body ?? {}));
+});
+
+api.get("/debug-browser/sessions/:sessionId", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.snapshot(sessionId);
+});
+
+api.post("/debug-browser/sessions/:sessionId/open", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.open(sessionId, DebugBrowserOpenInputSchema.parse(request.body));
+});
+
+api.post("/debug-browser/sessions/:sessionId/click", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.click(sessionId, DebugBrowserClickInputSchema.parse(request.body));
+});
+
+api.post("/debug-browser/sessions/:sessionId/type", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.type(sessionId, DebugBrowserTypeInputSchema.parse(request.body));
+});
+
+api.post("/debug-browser/sessions/:sessionId/extract", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.extract(sessionId, DebugBrowserExtractInputSchema.parse(request.body ?? {}));
+});
+
+api.post("/debug-browser/sessions/:sessionId/screenshot", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.screenshot(sessionId, DebugBrowserScreenshotInputSchema.parse(request.body ?? {}));
+});
+
+api.get("/debug-browser/sessions/:sessionId/recipe-draft", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.recipeDraft(sessionId);
+});
+
+api.post("/debug-browser/sessions/:sessionId/close", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.close(sessionId);
+});
+
+api.delete("/debug-browser/sessions/:sessionId", async (request) => {
+  const { sessionId } = DebugBrowserSessionIdSchema.parse(request.params);
+  return debugBrowsers.close(sessionId);
+});
+
+api.get("/source-recipes", async (request) => {
+  const { campaignId } = request.query as { campaignId?: string };
+  const recipes = await prisma.sourceRecipe.findMany({
+    where: campaignId
+      ? {
+          OR: [{ campaignId }, { campaignId: null }]
+        }
+      : undefined,
+    orderBy: [{ status: "asc" }, { successCount: "desc" }, { updatedAt: "desc" }],
+    take: 500
+  });
+
+  return {
+    recipes: recipes.map(formatSourceRecipe),
+    summary: {
+      total: recipes.length,
+      active: recipes.filter((recipe) => recipe.status === "active").length,
+      trial: recipes.filter((recipe) => recipe.status === "trial").length,
+      disabled: recipes.filter((recipe) => recipe.status === "disabled").length,
+      successes: recipes.reduce((total, recipe) => total + recipe.successCount, 0),
+      failures: recipes.reduce((total, recipe) => total + recipe.failureCount, 0)
+    }
+  };
+});
+
+api.get("/source-recipes/:recipeId", async (request, reply) => {
+  const { recipeId } = request.params as { recipeId: string };
+  const recipe = await prisma.sourceRecipe.findUnique({ where: { id: recipeId } });
+  if (!recipe) return reply.status(404).send({ error: "not_found" });
+  return formatSourceRecipe(recipe);
+});
+
+api.post("/source-recipes", async (request, reply) => {
+  const input = CreateSourceRecipeInputSchema.parse(request.body);
+  if (input.campaignId) {
+    const campaign = await prisma.campaign.findUnique({ where: { id: input.campaignId } });
+    if (!campaign) return reply.status(404).send({ error: "campaign_not_found" });
+  }
+
+  const recipeConfig = SourceRecipeConfigSchema.parse(input);
+  const recipe = await prisma.sourceRecipe.upsert({
+    where: {
+      name_version: {
+        name: input.name,
+        version: input.version
+      }
+    },
+    update: {
+      campaignId: input.campaignId ?? null,
+      status: input.status,
+      recipe: recipeConfig as Prisma.InputJsonValue,
+      supportedDomains: normalizeSourceDomains(input.supportedDomains)
+    },
+    create: {
+      campaignId: input.campaignId,
+      name: input.name,
+      version: input.version,
+      status: input.status,
+      recipe: recipeConfig as Prisma.InputJsonValue,
+      supportedDomains: normalizeSourceDomains(input.supportedDomains)
+    }
+  });
+
+  if (input.campaignId) {
+    await prisma.campaignEvent.create({
+      data: {
+        campaignId: input.campaignId,
+        type: "source_recipe_saved",
+        message: `Source recipe ${input.name}@${input.version} saved for reuse.`,
+        metadata: { source: "api", recipeId: recipe.id, status: recipe.status }
+      }
+    });
+  }
+
+  return {
+    sourceRecipe: formatSourceRecipe(recipe)
+  };
+});
+
+api.post("/source-recipes/:recipeId/status", async (request, reply) => {
+  const { recipeId } = request.params as { recipeId: string };
+  const input = UpdateSourceRecipeStatusInputSchema.parse(request.body);
+  const recipe = await prisma.sourceRecipe
+    .update({
+      where: { id: recipeId },
+      data: { status: input.status }
+    })
+    .catch(() => null);
+  if (!recipe) return reply.status(404).send({ error: "not_found" });
+  return { sourceRecipe: formatSourceRecipe(recipe) };
+});
+
+api.post("/source-recipes/:recipeId/activate", async (request, reply) => {
+  return setSourceRecipeStatus(request.params as { recipeId: string }, "active", reply);
+});
+
+api.post("/source-recipes/:recipeId/disable", async (request, reply) => {
+  return setSourceRecipeStatus(request.params as { recipeId: string }, "disabled", reply);
+});
+
+api.get("/enrichment-providers", async (request) => {
+  const { campaignId } = request.query as { campaignId?: string };
+  const providers = await prisma.enrichmentProvider.findMany({
+    where: campaignId ? { OR: [{ campaignId }, { campaignId: null }] } : undefined,
+    orderBy: [{ status: "asc" }, { successCount: "desc" }, { updatedAt: "desc" }],
+    take: 500
+  });
+
+  return {
+    providers: providers.map(formatEnrichmentProvider),
+    summary: summarizeSavedProviders(providers)
+  };
+});
+
+api.get("/enrichment-providers/:providerId", async (request, reply) => {
+  const { providerId } = request.params as { providerId: string };
+  const provider = await prisma.enrichmentProvider.findUnique({ where: { id: providerId } });
+  if (!provider) return reply.status(404).send({ error: "not_found" });
+  return formatEnrichmentProvider(provider);
+});
+
+api.post("/enrichment-providers", async (request, reply) => {
+  const input = CreateEnrichmentProviderInputSchema.parse(request.body);
+  if (input.campaignId) {
+    const campaign = await prisma.campaign.findUnique({ where: { id: input.campaignId } });
+    if (!campaign) return reply.status(404).send({ error: "campaign_not_found" });
+  }
+
+  const providerConfig = EnrichmentProviderConfigSchema.parse(input);
+  const provider = await prisma.enrichmentProvider.upsert({
+    where: {
+      name_version: {
+        name: input.name,
+        version: input.version
+      }
+    },
+    update: {
+      campaignId: input.campaignId ?? null,
+      status: input.status,
+      provider: providerConfig as Prisma.InputJsonValue,
+      supportedDomains: normalizeSourceDomains(input.supportedDomains)
+    },
+    create: {
+      campaignId: input.campaignId,
+      name: input.name,
+      version: input.version,
+      status: input.status,
+      provider: providerConfig as Prisma.InputJsonValue,
+      supportedDomains: normalizeSourceDomains(input.supportedDomains)
+    }
+  });
+
+  if (input.campaignId) {
+    await prisma.campaignEvent.create({
+      data: {
+        campaignId: input.campaignId,
+        type: "enrichment_provider_saved",
+        message: `Enrichment provider ${input.name}@${input.version} saved for reuse.`,
+        metadata: { source: "api", providerId: provider.id, status: provider.status }
+      }
+    });
+  }
+
+  return { provider: formatEnrichmentProvider(provider) };
+});
+
+api.post("/enrichment-providers/:providerId/status", async (request, reply) => {
+  const { providerId } = request.params as { providerId: string };
+  const input = UpdateSavedProviderStatusInputSchema.parse(request.body);
+  const provider = await prisma.enrichmentProvider
+    .update({
+      where: { id: providerId },
+      data: { status: input.status }
+    })
+    .catch(() => null);
+  if (!provider) return reply.status(404).send({ error: "not_found" });
+  return { provider: formatEnrichmentProvider(provider) };
+});
+
+api.post("/enrichment-providers/:providerId/activate", async (request, reply) => {
+  return setEnrichmentProviderStatus(request.params as { providerId: string }, "active", reply);
+});
+
+api.post("/enrichment-providers/:providerId/disable", async (request, reply) => {
+  return setEnrichmentProviderStatus(request.params as { providerId: string }, "disabled", reply);
+});
+
+api.get("/email-verification-providers", async (request) => {
+  const { campaignId } = request.query as { campaignId?: string };
+  const providers = await prisma.emailVerificationProvider.findMany({
+    where: campaignId ? { OR: [{ campaignId }, { campaignId: null }] } : undefined,
+    orderBy: [{ status: "asc" }, { successCount: "desc" }, { updatedAt: "desc" }],
+    take: 500
+  });
+
+  return {
+    providers: providers.map(formatEmailVerificationProvider),
+    summary: summarizeSavedProviders(providers)
+  };
+});
+
+api.get("/email-verification-providers/:providerId", async (request, reply) => {
+  const { providerId } = request.params as { providerId: string };
+  const provider = await prisma.emailVerificationProvider.findUnique({ where: { id: providerId } });
+  if (!provider) return reply.status(404).send({ error: "not_found" });
+  return formatEmailVerificationProvider(provider);
+});
+
+api.post("/email-verification-providers", async (request, reply) => {
+  const input = CreateEmailVerificationProviderInputSchema.parse(request.body);
+  if (input.campaignId) {
+    const campaign = await prisma.campaign.findUnique({ where: { id: input.campaignId } });
+    if (!campaign) return reply.status(404).send({ error: "campaign_not_found" });
+  }
+
+  const providerConfig = EmailVerificationProviderConfigSchema.parse(input);
+  const provider = await prisma.emailVerificationProvider.upsert({
+    where: {
+      name_version: {
+        name: input.name,
+        version: input.version
+      }
+    },
+    update: {
+      campaignId: input.campaignId ?? null,
+      status: input.status,
+      provider: providerConfig as Prisma.InputJsonValue,
+      supportedDomains: normalizeSourceDomains(input.supportedDomains)
+    },
+    create: {
+      campaignId: input.campaignId,
+      name: input.name,
+      version: input.version,
+      status: input.status,
+      provider: providerConfig as Prisma.InputJsonValue,
+      supportedDomains: normalizeSourceDomains(input.supportedDomains)
+    }
+  });
+
+  if (input.campaignId) {
+    await prisma.campaignEvent.create({
+      data: {
+        campaignId: input.campaignId,
+        type: "email_verification_provider_saved",
+        message: `Email verification provider ${input.name}@${input.version} saved for reuse.`,
+        metadata: { source: "api", providerId: provider.id, status: provider.status }
+      }
+    });
+  }
+
+  return { provider: formatEmailVerificationProvider(provider) };
+});
+
+api.post("/email-verification-providers/:providerId/status", async (request, reply) => {
+  const { providerId } = request.params as { providerId: string };
+  const input = UpdateSavedProviderStatusInputSchema.parse(request.body);
+  const provider = await prisma.emailVerificationProvider
+    .update({
+      where: { id: providerId },
+      data: { status: input.status }
+    })
+    .catch(() => null);
+  if (!provider) return reply.status(404).send({ error: "not_found" });
+  return { provider: formatEmailVerificationProvider(provider) };
+});
+
+api.post("/email-verification-providers/:providerId/activate", async (request, reply) => {
+  return setEmailVerificationProviderStatus(request.params as { providerId: string }, "active", reply);
+});
+
+api.post("/email-verification-providers/:providerId/disable", async (request, reply) => {
+  return setEmailVerificationProviderStatus(request.params as { providerId: string }, "disabled", reply);
 });
 
 api.get("/campaigns", async () => {
@@ -482,6 +835,194 @@ function normalizeProgress(value: unknown): ReturnType<typeof emptyProgress> {
     ranked: Number(progress.ranked ?? 0),
     errors: Number(progress.errors ?? 0)
   };
+}
+
+async function setSourceRecipeStatus(
+  params: { recipeId: string },
+  status: "trial" | "active" | "disabled",
+  reply: FastifyReply
+) {
+  const recipe = await prisma.sourceRecipe
+    .update({
+      where: { id: params.recipeId },
+      data: { status }
+    })
+    .catch(() => null);
+  if (!recipe) return reply.status(404).send({ error: "not_found" });
+  return { sourceRecipe: formatSourceRecipe(recipe) };
+}
+
+async function setEnrichmentProviderStatus(
+  params: { providerId: string },
+  status: "trial" | "active" | "disabled",
+  reply: FastifyReply
+) {
+  const provider = await prisma.enrichmentProvider
+    .update({
+      where: { id: params.providerId },
+      data: { status }
+    })
+    .catch(() => null);
+  if (!provider) return reply.status(404).send({ error: "not_found" });
+  return { provider: formatEnrichmentProvider(provider) };
+}
+
+async function setEmailVerificationProviderStatus(
+  params: { providerId: string },
+  status: "trial" | "active" | "disabled",
+  reply: FastifyReply
+) {
+  const provider = await prisma.emailVerificationProvider
+    .update({
+      where: { id: params.providerId },
+      data: { status }
+    })
+    .catch(() => null);
+  if (!provider) return reply.status(404).send({ error: "not_found" });
+  return { provider: formatEmailVerificationProvider(provider) };
+}
+
+function formatSourceRecipe(recipe: {
+  id: string;
+  campaignId: string | null;
+  name: string;
+  version: string;
+  status: string;
+  recipe: Prisma.JsonValue;
+  supportedDomains: string[];
+  successCount: number;
+  failureCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  const parsedConfig = SourceRecipeConfigSchema.safeParse(recipe.recipe);
+  const config = parsedConfig.success
+    ? parsedConfig.data
+    : SourceRecipeConfigSchema.parse({
+        description: "Stored recipe could not be parsed. Save a fresh version before activating.",
+        steps: []
+      });
+
+  return {
+    id: recipe.id,
+    campaignId: recipe.campaignId,
+    generatedFromCampaignId: recipe.campaignId ?? undefined,
+    name: recipe.name,
+    version: recipe.version,
+    status: normalizeSourceRecipeStatus(recipe.status),
+    supportedDomains: recipe.supportedDomains,
+    successCount: recipe.successCount,
+    failureCount: recipe.failureCount,
+    createdAt: recipe.createdAt.toISOString(),
+    updatedAt: recipe.updatedAt.toISOString(),
+    ...config
+  };
+}
+
+function formatEnrichmentProvider(provider: {
+  id: string;
+  campaignId: string | null;
+  name: string;
+  version: string;
+  status: string;
+  provider: Prisma.JsonValue;
+  supportedDomains: string[];
+  successCount: number;
+  failureCount: number;
+  lastUsedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  const parsedConfig = EnrichmentProviderConfigSchema.safeParse(provider.provider);
+  const config = parsedConfig.success
+    ? parsedConfig.data
+    : EnrichmentProviderConfigSchema.parse({
+        description: "Stored provider could not be parsed. Save a fresh version before activating.",
+        request: { urlTemplate: "https://invalid.local" }
+      });
+
+  return {
+    id: provider.id,
+    campaignId: provider.campaignId,
+    generatedFromCampaignId: provider.campaignId ?? undefined,
+    name: provider.name,
+    version: provider.version,
+    status: normalizeSourceRecipeStatus(provider.status),
+    supportedDomains: provider.supportedDomains,
+    successCount: provider.successCount,
+    failureCount: provider.failureCount,
+    missingEnvVars: config.requiredEnvVars.filter((name) => !process.env[name]),
+    lastUsedAt: provider.lastUsedAt?.toISOString() ?? null,
+    createdAt: provider.createdAt.toISOString(),
+    updatedAt: provider.updatedAt.toISOString(),
+    ...config
+  };
+}
+
+function formatEmailVerificationProvider(provider: {
+  id: string;
+  campaignId: string | null;
+  name: string;
+  version: string;
+  status: string;
+  provider: Prisma.JsonValue;
+  supportedDomains: string[];
+  successCount: number;
+  failureCount: number;
+  lastUsedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  const parsedConfig = EmailVerificationProviderConfigSchema.safeParse(provider.provider);
+  const config = parsedConfig.success
+    ? parsedConfig.data
+    : EmailVerificationProviderConfigSchema.parse({
+        description: "Stored provider could not be parsed. Save a fresh version before activating.",
+        request: { urlTemplate: "https://invalid.local" }
+      });
+
+  return {
+    id: provider.id,
+    campaignId: provider.campaignId,
+    generatedFromCampaignId: provider.campaignId ?? undefined,
+    name: provider.name,
+    version: provider.version,
+    status: normalizeSourceRecipeStatus(provider.status),
+    supportedDomains: provider.supportedDomains,
+    successCount: provider.successCount,
+    failureCount: provider.failureCount,
+    missingEnvVars: config.requiredEnvVars.filter((name) => !process.env[name]),
+    lastUsedAt: provider.lastUsedAt?.toISOString() ?? null,
+    createdAt: provider.createdAt.toISOString(),
+    updatedAt: provider.updatedAt.toISOString(),
+    ...config
+  };
+}
+
+function summarizeSavedProviders(providers: Array<{ status: string; successCount: number; failureCount: number }>) {
+  return {
+    total: providers.length,
+    active: providers.filter((provider) => provider.status === "active").length,
+    trial: providers.filter((provider) => provider.status === "trial").length,
+    disabled: providers.filter((provider) => provider.status === "disabled").length,
+    successes: providers.reduce((total, provider) => total + provider.successCount, 0),
+    failures: providers.reduce((total, provider) => total + provider.failureCount, 0)
+  };
+}
+
+function normalizeSourceRecipeStatus(status: string): "trial" | "active" | "disabled" {
+  if (status === "active" || status === "disabled" || status === "trial") return status;
+  return "trial";
+}
+
+function normalizeSourceDomains(domains: string[]): string[] {
+  return [
+    ...new Set(
+      domains
+        .map((domain) => domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, ""))
+        .filter(Boolean)
+    )
+  ];
 }
 
 function summarizeCampaigns(campaigns: Array<{ status: string; progress: ReturnType<typeof emptyProgress> }>) {

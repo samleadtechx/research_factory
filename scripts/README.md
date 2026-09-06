@@ -35,3 +35,9 @@ The MCP server is normally started by Codex over stdio. For manual debugging:
 ```bash
 scripts/start-mcp.sh
 ```
+
+Open a manual Camoufox inspector window for source/provider debugging:
+
+```bash
+scripts/debug-camoufox.sh https://example.com
+```

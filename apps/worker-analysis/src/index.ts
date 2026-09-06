@@ -12,6 +12,13 @@ import {
   type ScoringRule
 } from "@leadfactory/schemas";
 import { scoreClaims } from "@leadfactory/scoring";
+import {
+  EmailVerificationProviderConfigSchema,
+  EnrichmentProviderConfigSchema,
+  type EmailVerificationProviderConfig,
+  type EnrichmentProviderConfig,
+  type ProviderRequestTemplate
+} from "@leadfactory/source-adapters";
 import { Job, Worker } from "bullmq";
 import "dotenv/config";
 import { z } from "zod";
@@ -23,6 +30,70 @@ type SourceDocument = {
   title: string | null;
   cleanTextPath: string | null;
   text: string;
+};
+
+type SavedProviderRecord = {
+  id: string;
+  campaignId: string | null;
+  name: string;
+  version: string;
+  status: string;
+  provider: unknown;
+  supportedDomains: string[];
+  successCount: number;
+  failureCount: number;
+};
+
+type CompanySnapshot = {
+  id: string;
+  companyName: string;
+  domain: string | null;
+  website: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  phone: string | null;
+  emails: Prisma.JsonValue | null;
+  owners: Prisma.JsonValue | null;
+  managers: Prisma.JsonValue | null;
+  metadata: Prisma.JsonValue | null;
+};
+
+type EnrichedPerson = {
+  name: string;
+  role?: string;
+  email?: string;
+};
+
+type EnrichmentResult = {
+  companyName?: string;
+  website?: string;
+  domain?: string;
+  phone?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  emails: string[];
+  owners: EnrichedPerson[];
+  managers: EnrichedPerson[];
+  decisionMakers: EnrichedPerson[];
+  sourceUrl?: string;
+  evidenceQuote?: string;
+  confidence: number;
+  raw: unknown;
+};
+
+type EmailVerificationStatus = "verified" | "invalid" | "risky" | "unknown";
+
+type EmailVerificationResult = {
+  email: string;
+  normalizedEmail?: string;
+  status: EmailVerificationStatus;
+  score?: number;
+  reason?: string;
+  sourceUrl?: string;
+  evidenceQuote?: string;
+  raw: unknown;
 };
 
 const EvidenceBackedItemSchema = z.object({
@@ -138,19 +209,51 @@ async function analyzeAndRankLead(payload: AnalysisPayload) {
 
   const plan = parseCampaignPlan(lead.campaign.plan, lead.campaign.prompt, lead.campaign.name);
   const documents = await readSourceDocuments(payload.documentIds);
+  const enrichmentResults = await runActiveEnrichmentProviders({
+    campaignId: payload.campaignId,
+    leadId: lead.id,
+    companyId: lead.companyId ?? undefined,
+    company: lead.company,
+    plan
+  });
+  const leadAfterEnrichment = await prisma.lead.findUnique({
+    where: { id: payload.leadId },
+    include: {
+      company: true,
+      evidence: {
+        orderBy: { retrievedAt: "desc" }
+      }
+    }
+  });
   const analysis = await runQwenAnalysis({
     campaignId: payload.campaignId,
     prompt: lead.campaign.prompt,
     plan,
-    companyName: lead.company?.companyName ?? "Unknown company",
-    website: lead.company?.website ?? "",
+    companyName: leadAfterEnrichment?.company?.companyName ?? lead.company?.companyName ?? "Unknown company",
+    website: leadAfterEnrichment?.company?.website ?? lead.company?.website ?? "",
     documents,
-    fallbackEvidence: lead.evidence.map((evidence) => ({
+    fallbackEvidence: (leadAfterEnrichment?.evidence ?? lead.evidence).map((evidence) => ({
       id: evidence.id,
       field: evidence.field,
       quote: evidence.quote,
       url: evidence.url
     }))
+  });
+
+  await updateCompanyFromAnalysis(lead.companyId ?? undefined, analysis);
+  const companyForVerification = lead.companyId
+    ? await prisma.company.findUnique({ where: { id: lead.companyId } })
+    : null;
+  const emailsForVerification = mergeStringArrays(
+    readJsonStringArray(companyForVerification?.emails),
+    analysis.publicEmails.map((email) => email.value)
+  );
+  const verificationResults = await runActiveEmailVerificationProviders({
+    campaignId: payload.campaignId,
+    leadId: lead.id,
+    companyId: lead.companyId ?? undefined,
+    company: companyForVerification,
+    emails: emailsForVerification
   });
 
   await prisma.claim.deleteMany({
@@ -169,6 +272,7 @@ async function analyzeAndRankLead(payload: AnalysisPayload) {
   const allEvidenceIds = deterministicEvidence.map((evidence) => evidence.id);
   const emailEvidenceIds = matchingEvidenceIds(deterministicEvidence, "public_email");
   const peopleEvidenceIds = matchingEvidenceIds(deterministicEvidence, "owner_manager_name");
+  const verificationEvidenceIds = matchingEvidenceIds(deterministicEvidence, "email_verification");
   const signalEvidenceIds: string[] = [];
 
   if (analysis.icpFit.evidenceQuote) {
@@ -261,13 +365,41 @@ async function analyzeAndRankLead(payload: AnalysisPayload) {
       promptVersion: payload.promptVersion
     })
   );
+  claims.push(
+    await createClaim({
+      campaignId: payload.campaignId,
+      companyId: lead.companyId ?? undefined,
+      leadId: lead.id,
+      field: "verified_email_found",
+      value: verificationResults.some((result) => result.status === "verified"),
+      confidence: maxVerificationConfidence(verificationResults, verificationEvidenceIds.length > 0 ? 0.75 : 0.2),
+      evidenceIds: verificationEvidenceIds,
+      promptName: payload.promptName,
+      promptVersion: payload.promptVersion
+    })
+  );
+  claims.push(
+    await createClaim({
+      campaignId: payload.campaignId,
+      companyId: lead.companyId ?? undefined,
+      leadId: lead.id,
+      field: "invalid_email_found",
+      value: verificationResults.some((result) => result.status === "invalid"),
+      confidence: maxVerificationConfidence(
+        verificationResults.filter((result) => result.status === "invalid"),
+        0.2
+      ),
+      evidenceIds: verificationEvidenceIds,
+      promptName: payload.promptName,
+      promptVersion: payload.promptVersion
+    })
+  );
 
   const rules = mergeScoringRules(defaultScoringRules(), plan.scoringRules);
   const scored = scoreClaims({ claims, rules, cap: 100 });
   const score = Math.max(0, Math.min(100, scored.score));
   const disqualified = analysis.negativeMatches.some((match) => match.confidence >= 0.75);
 
-  await updateCompanyFromAnalysis(lead.companyId ?? undefined, analysis);
   await prisma.lead.update({
     where: { id: lead.id },
     data: {
@@ -279,13 +411,25 @@ async function analyzeAndRankLead(payload: AnalysisPayload) {
         components: scored.components,
         rejectedRuleIds: scored.rejectedRuleIds,
         qwenSummary: analysis.summary,
-        qwenModel: model
+        qwenModel: model,
+        enrichmentProviders: enrichmentResults.map((result) => ({
+          sourceUrl: result.sourceUrl,
+          emails: result.emails.length,
+          decisionMakers: result.decisionMakers.length,
+          confidence: result.confidence
+        })),
+        emailVerification: verificationResults.map((result) => ({
+          email: result.normalizedEmail ?? result.email,
+          status: result.status,
+          score: result.score,
+          reason: result.reason
+        }))
       },
       disqualified,
       disqualificationReason: disqualified
         ? analysis.negativeMatches.map((match) => match.value).join("; ").slice(0, 300)
         : null,
-      exportSnapshot: buildExportSnapshot(analysis)
+      exportSnapshot: buildExportSnapshot(analysis, verificationResults)
     }
   });
 
@@ -297,7 +441,9 @@ async function analyzeAndRankLead(payload: AnalysisPayload) {
     score,
     disqualified,
     claims: claims.length,
-    evidence: allEvidenceIds.length + signalEvidenceIds.length
+    evidence: allEvidenceIds.length + signalEvidenceIds.length,
+    enrichmentProviders: enrichmentResults.length,
+    emailVerifications: verificationResults.length
   };
 }
 
@@ -340,6 +486,383 @@ async function runQwenAnalysis(params: {
 
     return fallbackAnalysis(params.fallbackEvidence);
   }
+}
+
+async function runActiveEnrichmentProviders(params: {
+  campaignId: string;
+  leadId: string;
+  companyId?: string;
+  company: CompanySnapshot | null;
+  plan: CampaignPlan;
+}): Promise<EnrichmentResult[]> {
+  const providers = await prisma.enrichmentProvider.findMany({
+    where: {
+      OR: [
+        { status: "active", campaignId: null },
+        { status: "active", campaignId: params.campaignId },
+        { status: "trial", campaignId: params.campaignId }
+      ]
+    },
+    orderBy: [{ successCount: "desc" }, { updatedAt: "desc" }],
+    take: Number(process.env.MAX_ACTIVE_ENRICHMENT_PROVIDERS ?? 5)
+  });
+
+  const results: EnrichmentResult[] = [];
+  for (const provider of providers) {
+    const parsed = EnrichmentProviderConfigSchema.safeParse(provider.provider);
+    if (!parsed.success) {
+      await markEnrichmentProviderFailure(provider, "invalid_provider_config");
+      continue;
+    }
+
+    const config = parsed.data;
+    if (missingEnvVars(config.requiredEnvVars).length) continue;
+    if (!providerAppliesToCompany(provider.supportedDomains, params.company)) continue;
+    if (!shouldRunEnrichmentProvider(config, params.company)) continue;
+
+    const input = buildProviderInput(params.company, params.plan);
+    const run = await startProviderRun({
+      campaignId: params.campaignId,
+      companyId: params.companyId,
+      leadId: params.leadId,
+      providerType: "enrichment",
+      providerId: provider.id,
+      providerName: provider.name,
+      input
+    });
+
+    try {
+      const raw = await executeProviderRequest(config.request, input);
+      const mapped = mapEnrichmentResult(raw, config);
+      if (!hasEnrichmentResult(mapped)) {
+        await finishProviderRun(run.id, "completed", mapped, undefined);
+        await markEnrichmentProviderFailure(provider, "empty_enrichment_result");
+        continue;
+      }
+
+      await applyEnrichmentResult({
+        campaignId: params.campaignId,
+        companyId: params.companyId,
+        leadId: params.leadId,
+        providerName: provider.name,
+        result: mapped
+      });
+      await finishProviderRun(run.id, "completed", mapped, undefined);
+      await markEnrichmentProviderSuccess(provider);
+      results.push(mapped);
+    } catch (error) {
+      await finishProviderRun(run.id, "failed", undefined, error);
+      await markEnrichmentProviderFailure(provider, error instanceof Error ? error.message : "provider_request_failed");
+    } finally {
+      await waitForProviderRateLimit(config.rateLimitPerMinute);
+    }
+  }
+
+  return results;
+}
+
+async function runActiveEmailVerificationProviders(params: {
+  campaignId: string;
+  leadId: string;
+  companyId?: string;
+  company: CompanySnapshot | null;
+  emails: string[];
+}): Promise<EmailVerificationResult[]> {
+  const emails = [...new Set(params.emails.map(normalizeEmail).filter((email): email is string => Boolean(email)))].slice(
+    0,
+    Number(process.env.MAX_EMAILS_TO_VERIFY_PER_LEAD ?? 10)
+  );
+  if (!emails.length) return [];
+
+  const providers = await prisma.emailVerificationProvider.findMany({
+    where: {
+      OR: [
+        { status: "active", campaignId: null },
+        { status: "active", campaignId: params.campaignId },
+        { status: "trial", campaignId: params.campaignId }
+      ]
+    },
+    orderBy: [{ successCount: "desc" }, { updatedAt: "desc" }],
+    take: Number(process.env.MAX_ACTIVE_EMAIL_VERIFICATION_PROVIDERS ?? 3)
+  });
+
+  const results: EmailVerificationResult[] = [];
+  const remaining = new Set(emails);
+  for (const provider of providers) {
+    const parsed = EmailVerificationProviderConfigSchema.safeParse(provider.provider);
+    if (!parsed.success) {
+      await markEmailVerificationProviderFailure(provider, "invalid_provider_config");
+      continue;
+    }
+
+    const config = parsed.data;
+    if (missingEnvVars(config.requiredEnvVars).length) continue;
+
+    for (const email of [...remaining]) {
+      if (!providerAppliesToEmail(provider.supportedDomains, email)) continue;
+      const input = {
+        ...buildProviderInput(params.company, null),
+        email,
+        emailDomain: email.split("@")[1] ?? ""
+      };
+      const run = await startProviderRun({
+        campaignId: params.campaignId,
+        companyId: params.companyId,
+        leadId: params.leadId,
+        providerType: "email_verification",
+        providerId: provider.id,
+        providerName: provider.name,
+        input
+      });
+
+      try {
+        const raw = await executeProviderRequest(config.request, input);
+        const mapped = mapEmailVerificationResult(raw, config, email);
+        await createProviderEvidence({
+          campaignId: params.campaignId,
+          companyId: params.companyId,
+          leadId: params.leadId,
+          field: "email_verification",
+          sourceType: "email_verification",
+          url: mapped.sourceUrl ?? `https://provider.local/${encodeURIComponent(provider.name)}`,
+          quote:
+            mapped.evidenceQuote ??
+            `${mapped.normalizedEmail ?? mapped.email} verification: ${mapped.status}${mapped.reason ? ` (${mapped.reason})` : ""}`
+        });
+        await updateCompanyEmailVerification(params.companyId, provider.name, mapped);
+        await finishProviderRun(run.id, "completed", mapped, undefined);
+        await markEmailVerificationProviderSuccess(provider);
+        results.push(mapped);
+        remaining.delete(email);
+      } catch (error) {
+        await finishProviderRun(run.id, "failed", undefined, error);
+        await markEmailVerificationProviderFailure(provider, error instanceof Error ? error.message : "provider_request_failed");
+      } finally {
+        await waitForProviderRateLimit(config.rateLimitPerMinute);
+      }
+    }
+
+    if (!remaining.size) break;
+  }
+
+  return results;
+}
+
+async function executeProviderRequest(request: ProviderRequestTemplate, input: Record<string, unknown>): Promise<unknown> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= request.retryCount; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), request.timeoutMs);
+    try {
+      const url = new URL(renderTemplate(request.urlTemplate, input));
+      for (const [key, value] of Object.entries(request.queryTemplate)) {
+        const rendered = renderTemplate(value, input);
+        if (rendered) url.searchParams.set(key, rendered);
+      }
+
+      const headers = Object.fromEntries(
+        Object.entries(request.headersTemplate).map(([key, value]) => [key, renderTemplate(value, input)])
+      );
+      const method = request.method ?? "GET";
+      const body = request.bodyTemplate === undefined ? undefined : renderTemplateValue(request.bodyTemplate, input);
+      const response = await fetch(url, {
+        method,
+        headers: body === undefined ? headers : { "content-type": "application/json", ...headers },
+        body: body === undefined || method === "GET" ? undefined : JSON.stringify(body),
+        signal: controller.signal
+      });
+      const text = await response.text();
+      const parsed = parseProviderResponse(text);
+      if (!response.ok) {
+        throw new Error(`Provider HTTP ${response.status}: ${text.slice(0, 500)}`);
+      }
+      return parsed;
+    } catch (error) {
+      lastError = error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Provider request failed");
+}
+
+async function applyEnrichmentResult(params: {
+  campaignId: string;
+  companyId?: string;
+  leadId: string;
+  providerName: string;
+  result: EnrichmentResult;
+}) {
+  if (params.companyId) {
+    const company = await prisma.company.findUnique({ where: { id: params.companyId } });
+    if (company) {
+      const people = [...params.result.decisionMakers, ...params.result.owners, ...params.result.managers].map((person) => ({
+        name: person.name,
+        role: person.role ?? "decision maker",
+        email: person.email
+      }));
+      await prisma.company.update({
+        where: { id: params.companyId },
+        data: {
+          companyName: params.result.companyName ?? company.companyName,
+          website: company.website ?? params.result.website,
+          domain: company.domain ?? params.result.domain ?? domainFromUrl(params.result.website ?? ""),
+          phone: company.phone ?? params.result.phone,
+          city: company.city ?? params.result.city,
+          state: company.state ?? params.result.state,
+          country: company.country ?? params.result.country,
+          generalEmail: company.generalEmail ?? params.result.emails[0],
+          emails: mergeStringArrays(readJsonStringArray(company.emails), params.result.emails),
+          owners: mergePeople(readJsonPeople(company.owners), people.filter((person) => /owner|founder|ceo|president|principal/i.test(person.role))),
+          managers: mergePeople(readJsonPeople(company.managers), people),
+          metadata: mergeProviderMetadata(company.metadata, {
+            enrichment: {
+              providerName: params.providerName,
+              checkedAt: new Date().toISOString(),
+              confidence: params.result.confidence,
+              sourceUrl: params.result.sourceUrl
+            }
+          }),
+          lastCheckedAt: new Date()
+        }
+      });
+    }
+  }
+
+  const evidenceUrl = params.result.sourceUrl ?? `https://provider.local/${encodeURIComponent(params.providerName)}`;
+  const evidenceQuote =
+    params.result.evidenceQuote ??
+    [
+      params.result.companyName,
+      params.result.website,
+      params.result.phone,
+      params.result.emails.slice(0, 3).join(", ")
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+  if (evidenceQuote) {
+    await createProviderEvidence({
+      campaignId: params.campaignId,
+      companyId: params.companyId,
+      leadId: params.leadId,
+      field: "enrichment_provider",
+      sourceType: "enrichment_provider",
+      url: evidenceUrl,
+      quote: evidenceQuote
+    });
+  }
+
+  for (const email of params.result.emails.slice(0, 20)) {
+    await createProviderEvidence({
+      campaignId: params.campaignId,
+      companyId: params.companyId,
+      leadId: params.leadId,
+      field: "public_email",
+      sourceType: "enrichment_provider",
+      url: evidenceUrl,
+      quote: params.result.evidenceQuote ?? email
+    });
+  }
+
+  const people = [...params.result.decisionMakers, ...params.result.owners, ...params.result.managers];
+  for (const person of people.slice(0, 20)) {
+    await createProviderEvidence({
+      campaignId: params.campaignId,
+      companyId: params.companyId,
+      leadId: params.leadId,
+      field: "owner_manager_name",
+      sourceType: "enrichment_provider",
+      url: evidenceUrl,
+      quote: params.result.evidenceQuote ?? `${person.name}${person.role ? ` - ${person.role}` : ""}`
+    });
+  }
+}
+
+function mapEnrichmentResult(raw: unknown, config: EnrichmentProviderConfig): EnrichmentResult {
+  const mapping = config.outputMapping;
+  return {
+    companyName: firstStringAtPath(raw, mapping.companyNamePath ?? "companyName"),
+    website: firstStringAtPath(raw, mapping.websitePath ?? "website"),
+    domain: firstStringAtPath(raw, mapping.domainPath ?? "domain"),
+    phone: firstStringAtPath(raw, mapping.phonePath ?? "phone"),
+    city: firstStringAtPath(raw, mapping.cityPath ?? "city"),
+    state: firstStringAtPath(raw, mapping.statePath ?? "state"),
+    country: firstStringAtPath(raw, mapping.countryPath ?? "country"),
+    emails: stringsAtPath(raw, mapping.emailsPath ?? "emails"),
+    owners: peopleAtPath(raw, mapping.ownersPath ?? "owners"),
+    managers: peopleAtPath(raw, mapping.managersPath ?? "managers"),
+    decisionMakers: peopleAtPath(raw, mapping.decisionMakersPath ?? "decisionMakers"),
+    sourceUrl: firstStringAtPath(raw, mapping.sourceUrlPath ?? "sourceUrl"),
+    evidenceQuote: firstStringAtPath(raw, mapping.evidenceQuotePath ?? "evidenceQuote"),
+    confidence: clamp01(numberAtPath(raw, mapping.confidencePath ?? "confidence") ?? 0.7),
+    raw
+  };
+}
+
+function mapEmailVerificationResult(
+  raw: unknown,
+  config: EmailVerificationProviderConfig,
+  email: string
+): EmailVerificationResult {
+  const mapping = config.outputMapping;
+  const statusValue = firstStringAtPath(raw, mapping.statusPath);
+  const score = numberAtPath(raw, mapping.scorePath ?? "score");
+  return {
+    email,
+    normalizedEmail: firstStringAtPath(raw, mapping.normalizedEmailPath ?? "email") ?? email,
+    status: mapVerificationStatus(statusValue, score, mapping),
+    score,
+    reason: firstStringAtPath(raw, mapping.reasonPath ?? "reason"),
+    sourceUrl: firstStringAtPath(raw, mapping.sourceUrlPath ?? "sourceUrl"),
+    evidenceQuote: firstStringAtPath(raw, mapping.evidenceQuotePath ?? "evidenceQuote"),
+    raw
+  };
+}
+
+function hasEnrichmentResult(result: EnrichmentResult): boolean {
+  return Boolean(
+    result.companyName ||
+      result.website ||
+      result.domain ||
+      result.phone ||
+      result.city ||
+      result.state ||
+      result.country ||
+      result.emails.length ||
+      result.owners.length ||
+      result.managers.length ||
+      result.decisionMakers.length
+  );
+}
+
+function shouldRunEnrichmentProvider(config: EnrichmentProviderConfig, company: CompanySnapshot | null): boolean {
+  if (config.runWhen === "always") return true;
+  const emails = readJsonStringArray(company?.emails);
+  const people = [...readJsonPeople(company?.owners), ...readJsonPeople(company?.managers)];
+  if (config.runWhen === "missing_email") return emails.length === 0;
+  if (config.runWhen === "missing_decision_maker") return people.length === 0;
+  return emails.length === 0 || people.length === 0 || !company?.phone || !company.website;
+}
+
+function buildProviderInput(company: CompanySnapshot | null, plan: CampaignPlan | null): Record<string, unknown> {
+  const domain = company?.domain ?? domainFromUrl(company?.website ?? "") ?? "";
+  const emails = readJsonStringArray(company?.emails);
+  return {
+    companyName: company?.companyName ?? "",
+    domain,
+    website: company?.website ?? "",
+    city: company?.city ?? "",
+    state: company?.state ?? "",
+    country: company?.country ?? "",
+    phone: company?.phone ?? "",
+    emails,
+    icp: plan?.icpDescription ?? "",
+    campaignName: plan?.campaignName ?? "",
+    geography: plan?.geography.join(" ") ?? "",
+    signals: plan?.positiveSignals.join(" ") ?? ""
+  };
 }
 
 function buildLeadAnalysisPrompt(params: {
@@ -656,6 +1179,26 @@ function defaultScoringRules(): ScoringRule[] {
       requiresEvidence: true
     },
     {
+      id: "default_verified_email",
+      label: "Verified business email",
+      field: "verified_email_found",
+      operator: "equals",
+      value: true,
+      points: 10,
+      requiredConfidence: 0.75,
+      requiresEvidence: true
+    },
+    {
+      id: "default_invalid_email_penalty",
+      label: "Invalid email penalty",
+      field: "invalid_email_found",
+      operator: "equals",
+      value: true,
+      points: -10,
+      requiredConfidence: 0.75,
+      requiresEvidence: true
+    },
+    {
       id: "default_decision_maker",
       label: "Owner or manager found",
       field: "owner_or_manager_found",
@@ -784,9 +1327,15 @@ function averageClaimConfidence(claims: Claim[]): number {
   return Math.round((claims.reduce((total, claim) => total + claim.confidence, 0) / claims.length) * 100) / 100;
 }
 
-function buildExportSnapshot(analysis: LeadAnalysis) {
+function buildExportSnapshot(analysis: LeadAnalysis, verificationResults: EmailVerificationResult[] = []) {
   return {
     publicEmails: analysis.publicEmails.map((email) => email.value),
+    emailVerification: verificationResults.map((result) => ({
+      email: result.normalizedEmail ?? result.email,
+      status: result.status,
+      score: result.score,
+      reason: result.reason
+    })),
     decisionMakers: analysis.decisionMakers.map((person) => ({
       name: person.name,
       role: person.role,
@@ -815,6 +1364,422 @@ function normalizeComparable(value: string): string {
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+async function startProviderRun(params: {
+  campaignId: string;
+  companyId?: string;
+  leadId?: string;
+  providerType: string;
+  providerId: string;
+  providerName: string;
+  input: unknown;
+}) {
+  return prisma.providerRun.create({
+    data: {
+      campaignId: params.campaignId,
+      companyId: params.companyId,
+      leadId: params.leadId,
+      providerType: params.providerType,
+      providerId: params.providerId,
+      providerName: params.providerName,
+      status: "running",
+      input: toInputJson(params.input)
+    }
+  });
+}
+
+async function finishProviderRun(runId: string, status: "completed" | "failed", output?: unknown, error?: unknown) {
+  return prisma.providerRun.update({
+    where: { id: runId },
+    data: {
+      status,
+      output: output === undefined ? undefined : toInputJson(output),
+      error:
+        error === undefined
+          ? undefined
+          : toInputJson({
+              message: error instanceof Error ? error.message : String(error)
+            }),
+      completedAt: new Date()
+    }
+  });
+}
+
+async function markEnrichmentProviderSuccess(provider: SavedProviderRecord) {
+  await prisma.enrichmentProvider.update({
+    where: { id: provider.id },
+    data: {
+      successCount: { increment: 1 },
+      lastUsedAt: new Date(),
+      ...(shouldAutoActivateProvider(provider) ? { status: "active" } : {})
+    }
+  });
+}
+
+async function markEnrichmentProviderFailure(provider: SavedProviderRecord, reason: string) {
+  await prisma.enrichmentProvider.update({
+    where: { id: provider.id },
+    data: {
+      failureCount: { increment: 1 },
+      lastUsedAt: new Date(),
+      ...(shouldAutoDisableProvider(provider) ? { status: "disabled" } : {})
+    }
+  });
+  console.warn(JSON.stringify({ service: "worker-analysis", providerType: "enrichment", providerId: provider.id, reason }));
+}
+
+async function markEmailVerificationProviderSuccess(provider: SavedProviderRecord) {
+  await prisma.emailVerificationProvider.update({
+    where: { id: provider.id },
+    data: {
+      successCount: { increment: 1 },
+      lastUsedAt: new Date(),
+      ...(shouldAutoActivateProvider(provider) ? { status: "active" } : {})
+    }
+  });
+}
+
+async function markEmailVerificationProviderFailure(provider: SavedProviderRecord, reason: string) {
+  await prisma.emailVerificationProvider.update({
+    where: { id: provider.id },
+    data: {
+      failureCount: { increment: 1 },
+      lastUsedAt: new Date(),
+      ...(shouldAutoDisableProvider(provider) ? { status: "disabled" } : {})
+    }
+  });
+  console.warn(
+    JSON.stringify({ service: "worker-analysis", providerType: "email_verification", providerId: provider.id, reason })
+  );
+}
+
+async function createProviderEvidence(params: {
+  campaignId: string;
+  companyId?: string;
+  leadId?: string;
+  field: string;
+  sourceType: string;
+  url: string;
+  quote: string;
+}) {
+  const quote = normalizeWhitespace(params.quote).slice(0, 1500);
+  if (!quote) return null;
+
+  const existing = await prisma.evidence.findFirst({
+    where: {
+      campaignId: params.campaignId,
+      leadId: params.leadId,
+      field: params.field,
+      url: params.url,
+      quote
+    }
+  });
+  if (existing) return existing;
+
+  return prisma.evidence.create({
+    data: {
+      campaignId: params.campaignId,
+      companyId: params.companyId,
+      leadId: params.leadId,
+      field: params.field,
+      sourceType: params.sourceType,
+      retrievalMethod: "api",
+      url: params.url,
+      finalUrl: params.url,
+      quote,
+      contentHash: hashText(quote)
+    }
+  });
+}
+
+async function updateCompanyEmailVerification(
+  companyId: string | undefined,
+  providerName: string,
+  result: EmailVerificationResult
+) {
+  if (!companyId) return;
+  const company = await prisma.company.findUnique({ where: { id: companyId } });
+  if (!company) return;
+  const email = result.normalizedEmail ?? result.email;
+  const metadata = isRecord(company.metadata) ? { ...company.metadata } : {};
+  const current = isRecord(metadata.emailVerification) ? metadata.emailVerification : {};
+  metadata.emailVerification = {
+    ...current,
+    [email]: {
+      providerName,
+      status: result.status,
+      score: result.score,
+      reason: result.reason,
+      checkedAt: new Date().toISOString()
+    }
+  };
+
+  await prisma.company.update({
+    where: { id: companyId },
+    data: {
+      metadata: metadata as Prisma.InputJsonValue,
+      lastCheckedAt: new Date()
+    }
+  });
+}
+
+function parseProviderResponse(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return { text };
+  }
+}
+
+function renderTemplateValue(value: unknown, input: Record<string, unknown>): unknown {
+  if (typeof value === "string") return renderTemplate(value, input);
+  if (Array.isArray(value)) return value.map((item) => renderTemplateValue(item, input));
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renderTemplateValue(item, input)]));
+  }
+  return value;
+}
+
+function renderTemplate(template: string, input: Record<string, unknown>): string {
+  return template
+    .replace(/\{env[:.]([A-Z0-9_]+)\}/gi, (_match, name: string) => process.env[name] ?? "")
+    .replace(/\{([a-zA-Z0-9_.]+)\}/g, (_match, pathValue: string) => stringifyTemplateValue(firstValueAtPath(input, pathValue)));
+}
+
+function stringifyTemplateValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return value.map(stringifyTemplateValue).filter(Boolean).join(",");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function firstStringAtPath(value: unknown, pathValue?: string): string | undefined {
+  if (!pathValue) return undefined;
+  const valueAtPath = firstValueAtPath(value, pathValue);
+  if (typeof valueAtPath === "string") return valueAtPath.trim() || undefined;
+  if (typeof valueAtPath === "number" || typeof valueAtPath === "boolean") return String(valueAtPath);
+  return undefined;
+}
+
+function stringsAtPath(value: unknown, pathValue?: string): string[] {
+  if (!pathValue) return [];
+  return [...new Set(collectStrings(valuesAtPath(value, pathValue)).map((item) => item.trim()).filter(Boolean))];
+}
+
+function numberAtPath(value: unknown, pathValue?: string): number | undefined {
+  if (!pathValue) return undefined;
+  const valueAtPath = firstValueAtPath(value, pathValue);
+  if (typeof valueAtPath === "number" && !Number.isNaN(valueAtPath)) return valueAtPath > 1 ? valueAtPath / 100 : valueAtPath;
+  if (typeof valueAtPath === "string") {
+    const parsed = Number(valueAtPath);
+    if (!Number.isNaN(parsed)) return parsed > 1 ? parsed / 100 : parsed;
+  }
+  return undefined;
+}
+
+function firstValueAtPath(value: unknown, pathValue: string): unknown {
+  return valuesAtPath(value, pathValue)[0];
+}
+
+function valuesAtPath(value: unknown, pathValue: string): unknown[] {
+  const segments = pathValue.split(".").map((segment) => segment.trim()).filter(Boolean);
+  let current: unknown[] = [value];
+
+  for (const segment of segments) {
+    const { key, arrayMode, index } = parsePathSegment(segment);
+    const next: unknown[] = [];
+    for (const item of current) {
+      const valueAtKey = key ? readProperty(item, key) : item;
+      if (index !== undefined && Array.isArray(valueAtKey)) {
+        next.push(valueAtKey[index]);
+      } else if (arrayMode && Array.isArray(valueAtKey)) {
+        next.push(...valueAtKey);
+      } else {
+        next.push(valueAtKey);
+      }
+    }
+    current = next.filter((item) => item !== null && item !== undefined);
+  }
+
+  return current;
+}
+
+function parsePathSegment(segment: string): { key: string; arrayMode: boolean; index?: number } {
+  const arrayMatch = segment.match(/^(.+)\[\]$/);
+  if (arrayMatch) return { key: arrayMatch[1], arrayMode: true };
+  const indexMatch = segment.match(/^(.+)\[(\d+)\]$/);
+  if (indexMatch) return { key: indexMatch[1], arrayMode: false, index: Number(indexMatch[2]) };
+  return { key: segment, arrayMode: false };
+}
+
+function readProperty(value: unknown, key: string): unknown {
+  if (!isRecord(value)) return undefined;
+  return value[key];
+}
+
+function collectStrings(values: unknown[]): string[] {
+  const strings: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      strings.push(String(value));
+    } else if (Array.isArray(value)) {
+      strings.push(...collectStrings(value));
+    } else if (isRecord(value)) {
+      for (const key of ["email", "value", "address", "url", "name"]) {
+        if (typeof value[key] === "string") strings.push(value[key]);
+      }
+    }
+  }
+  return strings;
+}
+
+function peopleAtPath(value: unknown, pathValue?: string): EnrichedPerson[] {
+  if (!pathValue) return [];
+  const people: EnrichedPerson[] = [];
+  for (const item of valuesAtPath(value, pathValue)) {
+    const items = Array.isArray(item) ? item : [item];
+    for (const candidate of items) {
+      const person = personFromValue(candidate);
+      if (person) people.push(person);
+    }
+  }
+  return dedupePeople(people);
+}
+
+function personFromValue(value: unknown): EnrichedPerson | null {
+  if (typeof value === "string") {
+    const [name, role] = value.split(/\s+-\s+|\s+\|\s+/, 2).map((part) => part.trim());
+    return name ? { name, role } : null;
+  }
+  if (!isRecord(value)) return null;
+  const firstName = stringFromUnknown(value.firstName ?? value.first_name);
+  const lastName = stringFromUnknown(value.lastName ?? value.last_name);
+  const name =
+    stringFromUnknown(value.name ?? value.fullName ?? value.full_name) ??
+    [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (!name) return null;
+  return {
+    name,
+    role: stringFromUnknown(value.role ?? value.title ?? value.jobTitle ?? value.job_title ?? value.position),
+    email: normalizeEmail(stringFromUnknown(value.email ?? value.emailAddress ?? value.email_address) ?? "")
+  };
+}
+
+function dedupePeople(people: EnrichedPerson[]): EnrichedPerson[] {
+  const deduped = new Map<string, EnrichedPerson>();
+  for (const person of people) {
+    deduped.set(`${person.name.toLowerCase()}|${(person.role ?? "").toLowerCase()}`, person);
+  }
+  return [...deduped.values()].slice(0, 50);
+}
+
+function mapVerificationStatus(
+  statusValue: string | undefined,
+  score: number | undefined,
+  mapping: EmailVerificationProviderConfig["outputMapping"]
+): EmailVerificationStatus {
+  const normalized = (statusValue ?? "").toLowerCase().trim();
+  if (mapping.deliverableValues.map((value) => value.toLowerCase()).includes(normalized)) return "verified";
+  if (mapping.invalidValues.map((value) => value.toLowerCase()).includes(normalized)) return "invalid";
+  if (mapping.riskyValues.map((value) => value.toLowerCase()).includes(normalized)) return "risky";
+  if (typeof score === "number" && score >= 0.8) return "verified";
+  if (typeof score === "number" && score <= 0.2) return "invalid";
+  return "unknown";
+}
+
+function maxVerificationConfidence(results: EmailVerificationResult[], fallback: number): number {
+  return Math.max(fallback, ...results.map(verificationConfidence));
+}
+
+function verificationConfidence(result: EmailVerificationResult): number {
+  if (typeof result.score === "number") return clamp01(result.score);
+  if (result.status === "verified" || result.status === "invalid") return 0.85;
+  if (result.status === "risky") return 0.55;
+  return 0.35;
+}
+
+function providerAppliesToCompany(supportedDomains: string[], company: CompanySnapshot | null): boolean {
+  if (!supportedDomains.length) return true;
+  const domains = [
+    company?.domain,
+    domainFromUrl(company?.website ?? ""),
+    ...readJsonStringArray(company?.emails).map((email) => email.split("@")[1])
+  ].filter((domain): domain is string => Boolean(domain));
+  return domains.some((domain) => supportedDomains.some((supported) => domainMatches(domain, supported)));
+}
+
+function providerAppliesToEmail(supportedDomains: string[], email: string): boolean {
+  if (!supportedDomains.length) return true;
+  const domain = email.split("@")[1];
+  return Boolean(domain && supportedDomains.some((supported) => domainMatches(domain, supported)));
+}
+
+function domainMatches(domain: string, supportedDomain: string): boolean {
+  const normalized = supportedDomain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  const candidate = domain.trim().toLowerCase().replace(/^www\./, "");
+  return Boolean(normalized) && (candidate === normalized || candidate.endsWith(`.${normalized}`));
+}
+
+function domainFromUrl(value: string): string | null {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeEmail(value: string | undefined): string | undefined {
+  const email = value?.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0]?.toLowerCase();
+  if (!email || email.includes("@example.") || email.includes("@domain.")) return undefined;
+  return email;
+}
+
+function missingEnvVars(names: string[]): string[] {
+  return names.filter((name) => !process.env[name]);
+}
+
+function shouldAutoActivateProvider(provider: SavedProviderRecord): boolean {
+  const threshold = Number(process.env.PROVIDER_AUTO_ACTIVATE_AFTER ?? 3);
+  return provider.status === "trial" && threshold > 0 && provider.successCount + 1 >= threshold;
+}
+
+function shouldAutoDisableProvider(provider: SavedProviderRecord): boolean {
+  const threshold = Number(process.env.PROVIDER_AUTO_DISABLE_AFTER ?? 10);
+  return provider.status !== "disabled" && provider.successCount === 0 && threshold > 0 && provider.failureCount + 1 >= threshold;
+}
+
+async function waitForProviderRateLimit(rateLimitPerMinute: number) {
+  if (process.env.PROVIDER_ENFORCE_RATE_LIMITS === "false") return;
+  const delayMs = Math.ceil(60_000 / Math.max(1, rateLimitPerMinute));
+  const cappedDelayMs = Math.min(delayMs, Number(process.env.PROVIDER_MAX_RATE_DELAY_MS ?? 30_000));
+  if (cappedDelayMs > 50) await sleep(cappedDelayMs);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function mergeProviderMetadata(existing: unknown, patch: Record<string, unknown>): Prisma.InputJsonValue {
+  const base = isRecord(existing) ? existing : {};
+  return {
+    ...base,
+    ...patch
+  } as Prisma.InputJsonValue;
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return undefined;
+}
+
+function toInputJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function readJsonStringArray(value: unknown): string[] {

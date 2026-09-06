@@ -22,6 +22,7 @@ RUN apt-get update \
     python3 \
     python3-pip \
     python3-venv \
+    xvfb \
   && rm -rf /var/lib/apt/lists/*
 
 RUN corepack enable && corepack prepare pnpm@11.19.0 --activate

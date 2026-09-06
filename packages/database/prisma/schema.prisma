@@ -49,53 +49,56 @@ enum RetrievalMethod {
 }
 
 model Campaign {
-  id                  String         @id @default(uuid())
-  name                String
-  prompt              String
-  promptVersion       String         @default("v1")
-  status              CampaignStatus @default(planning)
-  plan                Json?
-  settings            Json?
-  targetLeadCount     Int?
-  serverUsagePercent  Int?
-  progress            Json?
-  error               Json?
-  createdAt           DateTime       @default(now())
-  updatedAt           DateTime       @updatedAt
-  startedAt           DateTime?
-  completedAt         DateTime?
+  id                 String         @id @default(uuid())
+  name               String
+  prompt             String
+  promptVersion      String         @default("v1")
+  status             CampaignStatus @default(planning)
+  plan               Json?
+  settings           Json?
+  targetLeadCount    Int?
+  serverUsagePercent Int?
+  progress           Json?
+  error              Json?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  startedAt          DateTime?
+  completedAt        DateTime?
 
-  jobs                ResearchJob[]
-  leads               Lead[]
-  documents           Document[]
-  evidence            Evidence[]
-  claims              Claim[]
-  sourceFailures      SourceFailure[]
-  events              CampaignEvent[]
-  sourceRecipes       SourceRecipe[]
+  jobs                       ResearchJob[]
+  leads                      Lead[]
+  documents                  Document[]
+  evidence                   Evidence[]
+  claims                     Claim[]
+  sourceFailures             SourceFailure[]
+  events                     CampaignEvent[]
+  sourceRecipes              SourceRecipe[]
+  enrichmentProviders        EnrichmentProvider[]
+  emailVerificationProviders EmailVerificationProvider[]
+  providerRuns               ProviderRun[]
 }
 
 model ResearchJob {
-  id          String     @id @default(uuid())
+  id          String    @id @default(uuid())
   campaignId  String
   type        String
-  status      JobStatus  @default(queued)
-  priority    Int        @default(0)
+  status      JobStatus @default(queued)
+  priority    Int       @default(0)
   parameters  Json
   statistics  Json?
   error       Json?
-  createdAt   DateTime   @default(now())
+  createdAt   DateTime  @default(now())
   startedAt   DateTime?
   completedAt DateTime?
 
-  campaign    Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, status])
   @@index([type, status, priority])
 }
 
 model Company {
-  id             String     @id @default(uuid())
+  id             String    @id @default(uuid())
   companyName    String
   normalizedName String?
   domain         String?
@@ -109,15 +112,16 @@ model Company {
   owners         Json?
   managers       Json?
   metadata       Json?
-  firstSeenAt    DateTime   @default(now())
+  firstSeenAt    DateTime  @default(now())
   lastCheckedAt  DateTime?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  leads          Lead[]
-  documents      Document[]
-  evidence       Evidence[]
-  claims         Claim[]
+  leads        Lead[]
+  documents    Document[]
+  evidence     Evidence[]
+  claims       Claim[]
+  providerRuns ProviderRun[]
 
   @@index([domain])
   @@index([phone])
@@ -125,25 +129,26 @@ model Company {
 }
 
 model Lead {
-  id                     String    @id @default(uuid())
+  id                     String   @id @default(uuid())
   campaignId             String
   companyId              String?
-  status                 String    @default("candidate")
-  score                  Int       @default(0)
-  confidence             Float     @default(0)
+  status                 String   @default("candidate")
+  score                  Int      @default(0)
+  confidence             Float    @default(0)
   strongestSignal        String?
   scoreComponents        Json?
-  disqualified           Boolean   @default(false)
+  disqualified           Boolean  @default(false)
   disqualificationReason String?
   rank                   Int?
   exportSnapshot         Json?
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
-  campaign               Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  company                Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
-  evidence               Evidence[]
-  claims                 Claim[]
+  campaign     Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company      Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  evidence     Evidence[]
+  claims       Claim[]
+  providerRuns ProviderRun[]
 
   @@index([campaignId, score])
   @@index([campaignId, rank])
@@ -168,9 +173,9 @@ model Document {
   title           String?
   metadata        Json?
 
-  campaign        Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  company         Company?        @relation(fields: [companyId], references: [id], onDelete: SetNull)
-  evidence        Evidence[]
+  campaign Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company  Company?   @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  evidence Evidence[]
 
   @@index([campaignId, retrievedAt])
   @@index([companyId])
@@ -194,10 +199,10 @@ model Evidence {
   contentHash     String?
   metadata        Json?
 
-  campaign        Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  company         Company?        @relation(fields: [companyId], references: [id], onDelete: SetNull)
-  lead            Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
-  document        Document?       @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  campaign Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company  Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  lead     Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  document Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
 
   @@index([campaignId, field])
   @@index([companyId])
@@ -206,7 +211,7 @@ model Evidence {
 }
 
 model Claim {
-  id              String    @id @default(uuid())
+  id              String   @id @default(uuid())
   campaignId      String
   companyId       String?
   leadId          String?
@@ -218,11 +223,11 @@ model Claim {
   promptVersion   String
   model           String
   analysisVersion String
-  createdAt       DateTime  @default(now())
+  createdAt       DateTime @default(now())
 
-  campaign        Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  company         Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
-  lead            Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company  Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  lead     Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
 
   @@index([campaignId, field])
   @@index([companyId, field])
@@ -252,51 +257,115 @@ model Proxy {
 }
 
 model SourceFailure {
-  id          String   @id @default(uuid())
-  campaignId  String
-  companyId   String?
-  leadId      String?
-  url         String
-  sourceName  String?
-  reason      String
-  details     Json?
-  blocked     Boolean  @default(false)
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid())
+  campaignId String
+  companyId  String?
+  leadId     String?
+  url        String
+  sourceName String?
+  reason     String
+  details    Json?
+  blocked    Boolean  @default(false)
+  createdAt  DateTime @default(now())
 
-  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, blocked])
   @@index([url])
 }
 
 model SourceRecipe {
-  id                      String   @id @default(uuid())
-  campaignId              String?
-  name                    String
-  version                 String
-  status                  String   @default("trial")
-  recipe                  Json
-  supportedDomains        String[]
-  successCount            Int      @default(0)
-  failureCount            Int      @default(0)
-  createdAt               DateTime @default(now())
-  updatedAt               DateTime @updatedAt
+  id               String   @id @default(uuid())
+  campaignId       String?
+  name             String
+  version          String
+  status           String   @default("trial")
+  recipe           Json
+  supportedDomains String[]
+  successCount     Int      @default(0)
+  failureCount     Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  campaign                Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
   @@unique([name, version])
   @@index([status])
 }
 
-model CampaignEvent {
-  id          String   @id @default(uuid())
-  campaignId  String
-  type        String
-  message     String
-  metadata    Json?
-  createdAt   DateTime @default(now())
+model EnrichmentProvider {
+  id               String    @id @default(uuid())
+  campaignId       String?
+  name             String
+  version          String
+  status           String    @default("trial")
+  provider         Json
+  supportedDomains String[]  @default([])
+  successCount     Int       @default(0)
+  failureCount     Int       @default(0)
+  lastUsedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
-  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@unique([name, version])
+  @@index([status])
+}
+
+model EmailVerificationProvider {
+  id               String    @id @default(uuid())
+  campaignId       String?
+  name             String
+  version          String
+  status           String    @default("trial")
+  provider         Json
+  supportedDomains String[]  @default([])
+  successCount     Int       @default(0)
+  failureCount     Int       @default(0)
+  lastUsedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@unique([name, version])
+  @@index([status])
+}
+
+model ProviderRun {
+  id           String    @id @default(uuid())
+  campaignId   String
+  companyId    String?
+  leadId       String?
+  providerType String
+  providerId   String
+  providerName String?
+  status       String
+  input        Json?
+  output       Json?
+  error        Json?
+  createdAt    DateTime  @default(now())
+  completedAt  DateTime?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company  Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  lead     Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, providerType, status])
+  @@index([providerId, providerType])
+  @@index([leadId])
+}
+
+model CampaignEvent {
+  id         String   @id @default(uuid())
+  campaignId String
+  type       String
+  message    String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
   @@index([campaignId, createdAt])
 }
