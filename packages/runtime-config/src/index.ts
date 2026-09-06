@@ -15,6 +15,7 @@ export function defaultRuntimeSettings(): RuntimeSettings {
     localLlmBaseUrl: process.env.LOCAL_LLM_BASE_URL ?? "http://73.72.215.253:11434/v1",
     localLlmModel: process.env.LOCAL_LLM_MODEL ?? "qwen2.5:14b",
     localLlmApiKey: process.env.LOCAL_LLM_API_KEY ?? "local",
+    mcpBearerToken: process.env.MCP_BEARER_TOKEN ?? "",
     appStorageDir: process.env.APP_STORAGE_DIR ?? (inContainer ? "/app/data" : "./data"),
     serverUsagePercent: numberFromEnv("SERVER_USAGE_PERCENT", 60),
     maxBrowsersHardCap: numberFromEnv("MAX_BROWSERS_HARD_CAP", 40),

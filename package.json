@@ -10,6 +10,7 @@
   "files": [
     "bin/lead-research-factory-mcp.js",
     "apps/mcp-server/src/index.ts",
+    "apps/mcp-server/src/server.ts",
     "README.md"
   ],
   "scripts": {

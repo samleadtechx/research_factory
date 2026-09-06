@@ -38,8 +38,24 @@ bash scripts/status.sh
 ## MCP
 
 Copy the MCP config and Codex instructions from the dashboard Settings section.
-The default config uses `npx`, so Codex does not need this repo cloned on the
-same machine:
+For Codex CLI, desktop, and IDE extension, use the remote Streamable HTTP MCP URL
+directly. Codex does not need this repo cloned on the same machine:
+
+```toml
+[mcp_servers.lead-research-factory]
+url = "https://factory.leadtechx.com/api/mcp"
+bearer_token_env_var = "LEADFACTORY_MCP_TOKEN"
+```
+
+Or add it with the CLI:
+
+```bash
+export LEADFACTORY_MCP_TOKEN='paste-your-token-here'
+codex mcp add lead-research-factory --url 'https://factory.leadtechx.com/api/mcp' --bearer-token-env-var LEADFACTORY_MCP_TOKEN
+```
+
+For clients that expect a stdio command inside a JSON MCP config, use
+`mcp-remote`:
 
 ```json
 {
@@ -48,17 +64,21 @@ same machine:
       "command": "npx",
       "args": [
         "-y",
-        "--package",
-        "github:samleadtechx/research_factory#main",
-        "lead-research-factory-mcp"
+        "mcp-remote",
+        "https://factory.leadtechx.com/api/mcp",
+        "--header",
+        "Authorization:Bearer ${LEADFACTORY_MCP_TOKEN}"
       ],
       "env": {
-        "API_BASE_URL": "https://factory.leadtechx.com/api"
+        "LEADFACTORY_MCP_TOKEN": "paste-your-token-here"
       }
     }
   }
 }
 ```
+
+Set `MCP Token` in the dashboard Runtime Settings panel to require that bearer
+token on the remote MCP endpoint. Leave it blank only for private/local testing.
 
 Main tools:
 

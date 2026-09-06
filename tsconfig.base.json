@@ -16,6 +16,7 @@
       "@leadfactory/database": ["packages/database/src/index.ts"],
       "@leadfactory/document-store": ["packages/document-store/src/index.ts"],
       "@leadfactory/llm": ["packages/llm/src/index.ts"],
+      "@leadfactory/mcp-server": ["apps/mcp-server/src/server.ts"],
       "@leadfactory/proxy-manager": ["packages/proxy-manager/src/index.ts"],
       "@leadfactory/queue": ["packages/queue/src/index.ts"],
       "@leadfactory/resource-governor": ["packages/resource-governor/src/index.ts"],

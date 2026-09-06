@@ -150,6 +150,7 @@ type RuntimeSettings = {
   localLlmBaseUrl: string;
   localLlmModel: string;
   localLlmApiKey: string;
+  mcpBearerToken: string;
   appStorageDir: string;
   serverUsagePercent: number;
   maxBrowsersHardCap: number;
@@ -292,21 +293,24 @@ const emptySavedProviderSummary: ProviderListSummary = {
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
-const mcpNpxPackage = "github:samleadtechx/research_factory#main";
-const mcpCommandName = "lead-research-factory-mcp";
 const defaultPublicAppUrl = "http://localhost:3000";
 const publicAppUrlStorageKey = "leadfactory.publicAppUrl";
 
-function buildMcpConfig(mcpApiBaseUrl: string): string {
+function buildMcpConfig(remoteMcpUrl: string, bearerToken: string): string {
+  const hasToken = bearerToken.trim().length > 0;
   return JSON.stringify(
     {
       mcpServers: {
         "lead-research-factory": {
           command: "npx",
-          args: ["-y", "--package", mcpNpxPackage, mcpCommandName],
-          env: {
-            API_BASE_URL: mcpApiBaseUrl
-          }
+          args: hasToken
+            ? ["-y", "mcp-remote", remoteMcpUrl, "--header", "Authorization:Bearer ${LEADFACTORY_MCP_TOKEN}"]
+            : ["-y", "mcp-remote", remoteMcpUrl],
+          env: hasToken
+            ? {
+                LEADFACTORY_MCP_TOKEN: bearerToken
+              }
+            : {}
         }
       }
     },
@@ -315,7 +319,38 @@ function buildMcpConfig(mcpApiBaseUrl: string): string {
   );
 }
 
-function buildCodexInstructions(publicAppUrl: string, mcpApiBaseUrl: string): string {
+function buildCodexTomlConfig(remoteMcpUrl: string, bearerToken: string): string {
+  const lines = [
+    "[mcp_servers.lead-research-factory]",
+    `url = "${tomlString(remoteMcpUrl)}"`
+  ];
+
+  if (bearerToken.trim()) {
+    lines.push('bearer_token_env_var = "LEADFACTORY_MCP_TOKEN"');
+  }
+
+  return lines.join("\n");
+}
+
+function buildCodexCliCommand(remoteMcpUrl: string, bearerToken: string): string {
+  const command = [
+    "codex",
+    "mcp",
+    "add",
+    "lead-research-factory",
+    "--url",
+    shellQuote(remoteMcpUrl)
+  ];
+
+  if (bearerToken.trim()) {
+    command.push("--bearer-token-env-var", "LEADFACTORY_MCP_TOKEN");
+    return `export LEADFACTORY_MCP_TOKEN=${shellQuote(bearerToken)}\n${command.join(" ")}`;
+  }
+
+  return command.join(" ");
+}
+
+function buildCodexInstructions(publicAppUrl: string, mcpApiBaseUrl: string, remoteMcpUrl: string): string {
   return `Use the lead-research-factory MCP server as the control plane for lead research.
 
 Operating model:
@@ -384,11 +419,24 @@ Currently wired MCP tools:
 App endpoints:
 - Dashboard: ${publicAppUrl}
 - API base: ${mcpApiBaseUrl}
-- MCP command: npx -y --package ${mcpNpxPackage} ${mcpCommandName}`;
+- Remote MCP: ${remoteMcpUrl}`;
 }
 
-function buildAllMcpInstructions(mcpConfig: string, codexInstructions: string): string {
-  return `MCP config:
+function buildAllMcpInstructions(
+  codexTomlConfig: string,
+  codexCliCommand: string,
+  mcpConfig: string,
+  codexInstructions: string
+): string {
+  return `Codex config.toml:
+
+${codexTomlConfig}
+
+Codex CLI:
+
+${codexCliCommand}
+
+Claude-style JSON config:
 
 ${mcpConfig}
 
@@ -434,6 +482,26 @@ function deriveMcpApiBaseUrl(publicAppUrl: string): string {
   } catch {
     return publicAppUrl.replace(/\/$/, "");
   }
+}
+
+function deriveRemoteMcpUrl(publicAppUrl: string): string {
+  const apiBase = deriveMcpApiBaseUrl(publicAppUrl);
+  try {
+    const url = new URL(apiBase);
+    const normalizedPath = url.pathname.replace(/\/+$/, "");
+    url.pathname = normalizedPath.endsWith("/mcp") ? normalizedPath : `${normalizedPath || ""}/mcp`;
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return `${apiBase.replace(/\/$/, "")}/mcp`;
+  }
+}
+
+function tomlString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 export default function DashboardPage() {
@@ -516,14 +584,24 @@ export default function DashboardPage() {
 
   const normalizedPublicAppUrl = useMemo(() => normalizePublicAppUrl(publicAppUrl), [publicAppUrl]);
   const mcpApiBaseUrl = useMemo(() => deriveMcpApiBaseUrl(normalizedPublicAppUrl), [normalizedPublicAppUrl]);
-  const mcpConfig = useMemo(() => buildMcpConfig(mcpApiBaseUrl), [mcpApiBaseUrl]);
+  const remoteMcpUrl = useMemo(() => deriveRemoteMcpUrl(normalizedPublicAppUrl), [normalizedPublicAppUrl]);
+  const mcpBearerToken = runtimeSettings?.mcpBearerToken ?? "";
+  const mcpConfig = useMemo(() => buildMcpConfig(remoteMcpUrl, mcpBearerToken), [remoteMcpUrl, mcpBearerToken]);
+  const codexTomlConfig = useMemo(
+    () => buildCodexTomlConfig(remoteMcpUrl, mcpBearerToken),
+    [remoteMcpUrl, mcpBearerToken]
+  );
+  const codexCliCommand = useMemo(
+    () => buildCodexCliCommand(remoteMcpUrl, mcpBearerToken),
+    [remoteMcpUrl, mcpBearerToken]
+  );
   const codexInstructions = useMemo(
-    () => buildCodexInstructions(normalizedPublicAppUrl, mcpApiBaseUrl),
-    [normalizedPublicAppUrl, mcpApiBaseUrl]
+    () => buildCodexInstructions(normalizedPublicAppUrl, mcpApiBaseUrl, remoteMcpUrl),
+    [normalizedPublicAppUrl, mcpApiBaseUrl, remoteMcpUrl]
   );
   const allMcpInstructions = useMemo(
-    () => buildAllMcpInstructions(mcpConfig, codexInstructions),
-    [mcpConfig, codexInstructions]
+    () => buildAllMcpInstructions(codexTomlConfig, codexCliCommand, mcpConfig, codexInstructions),
+    [codexTomlConfig, codexCliCommand, mcpConfig, codexInstructions]
   );
 
   useEffect(() => {
@@ -960,9 +1038,13 @@ export default function DashboardPage() {
         <div className="panelHeader">
           <h2>MCP Settings</h2>
           <div className="copyActions">
-            <button className="copyButton" onClick={() => copyText(mcpConfig, "config")}>
-              {copiedTarget === "config" ? <Check size={16} /> : <Copy size={16} />}
-              <span>Config</span>
+            <button className="copyButton" onClick={() => copyText(codexTomlConfig, "codex-config")}>
+              {copiedTarget === "codex-config" ? <Check size={16} /> : <Copy size={16} />}
+              <span>Codex Config</span>
+            </button>
+            <button className="copyButton" onClick={() => copyText(codexCliCommand, "codex-cli")}>
+              {copiedTarget === "codex-cli" ? <Check size={16} /> : <Copy size={16} />}
+              <span>CLI</span>
             </button>
             <button className="copyButton" onClick={() => copyText(codexInstructions, "instructions")}>
               {copiedTarget === "instructions" ? <Check size={16} /> : <Copy size={16} />}
@@ -986,8 +1068,8 @@ export default function DashboardPage() {
             />
           </label>
           <div className="endpointPreview">
-            <span>API_BASE_URL</span>
-            <strong>{mcpApiBaseUrl}</strong>
+            <span>Remote MCP URL</span>
+            <strong>{remoteMcpUrl}</strong>
           </div>
           <button className="copyButton" onClick={() => setPublicAppUrl(window.location.origin)}>
             <RefreshCw size={16} />
@@ -1049,6 +1131,12 @@ export default function DashboardPage() {
                     value={runtimeSettings.localLlmApiKey}
                     type="password"
                     onChange={(value) => updateRuntimeSetting("localLlmApiKey", value)}
+                  />
+                  <RuntimeTextInput
+                    label="MCP Token"
+                    value={runtimeSettings.mcpBearerToken}
+                    type="password"
+                    onChange={(value) => updateRuntimeSetting("mcpBearerToken", value)}
                   />
                   <RuntimeTextInput
                     label="Storage Dir"
@@ -1497,8 +1585,24 @@ export default function DashboardPage() {
         <div className="settingsGrid">
           <div className="settingsBlock">
             <div className="blockTitle">
-              <strong>Server config</strong>
-              <span>stdio</span>
+              <strong>Codex config</strong>
+              <span>config.toml</span>
+            </div>
+            <pre>{codexTomlConfig}</pre>
+          </div>
+
+          <div className="settingsBlock">
+            <div className="blockTitle">
+              <strong>Codex CLI</strong>
+              <span>direct HTTP</span>
+            </div>
+            <pre>{codexCliCommand}</pre>
+          </div>
+
+          <div className="settingsBlock">
+            <div className="blockTitle">
+              <strong>JSON config</strong>
+              <span>mcp-remote</span>
             </div>
             <pre>{mcpConfig}</pre>
           </div>

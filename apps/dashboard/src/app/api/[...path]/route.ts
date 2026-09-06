@@ -21,12 +21,17 @@ export async function POST(request: NextRequest, context: RouteContext) {
   return proxyRequest(request, context);
 }
 
+export async function DELETE(request: NextRequest, context: RouteContext) {
+  return proxyRequest(request, context);
+}
+
 async function proxyRequest(request: NextRequest, context: RouteContext) {
   const { path } = await context.params;
   const incomingUrl = new URL(request.url);
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
+  headers.set("x-leadfactory-public-api-base-url", publicApiBaseUrl(incomingUrl, path));
   const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
 
   let lastError: unknown;
@@ -68,4 +73,17 @@ async function proxyRequest(request: NextRequest, context: RouteContext) {
 
 function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
+}
+
+function publicApiBaseUrl(incomingUrl: URL, path: string[]): string {
+  const externalUrl = new URL(incomingUrl.origin);
+  const normalizedPath = incomingUrl.pathname.replace(/\/+$/, "");
+  const pathTail = `/${path.join("/")}`.replace(/\/+$/, "");
+
+  externalUrl.pathname =
+    pathTail && normalizedPath.endsWith(pathTail)
+      ? normalizedPath.slice(0, -pathTail.length) || "/"
+      : normalizedPath || "/";
+
+  return externalUrl.toString().replace(/\/$/, "");
 }

@@ -13,6 +13,7 @@ import {
   StartDebugBrowserInputSchema
 } from "./debugBrowser.js";
 import { OpenAICompatibleLLMProvider } from "@leadfactory/llm";
+import { createLeadResearchMcpServer } from "@leadfactory/mcp-server";
 import { parseProxyText } from "@leadfactory/proxy-manager";
 import { createQueue, queueNames, type BrowserResearchPayload } from "@leadfactory/queue";
 import {
@@ -38,8 +39,9 @@ import {
   UpdateSavedProviderStatusInputSchema,
   UpdateSourceRecipeStatusInputSchema
 } from "@leadfactory/source-adapters";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import "dotenv/config";
-import Fastify, { type FastifyReply } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { ZodError } from "zod";
 
 const api = Fastify({
@@ -83,6 +85,12 @@ api.get("/health", async () => ({
   service: "leadfactory-api",
   time: new Date().toISOString()
 }));
+
+api.route({
+  method: ["GET", "POST", "DELETE"],
+  url: "/mcp",
+  handler: handleRemoteMcpRequest
+});
 
 api.get("/settings/defaults", async () => defaultRuntimeSettings());
 
@@ -815,6 +823,89 @@ api.get("/proxies", async () => {
 
 const port = Number(process.env.API_PORT ?? 4000);
 await api.listen({ port, host: "0.0.0.0" });
+
+async function handleRemoteMcpRequest(request: FastifyRequest, reply: FastifyReply) {
+  const settings = await readRuntimeSettings();
+  const bearerToken = settings.mcpBearerToken.trim();
+  if (bearerToken) {
+    const authorization = Array.isArray(request.headers.authorization)
+      ? request.headers.authorization[0]
+      : request.headers.authorization;
+    if (authorization !== `Bearer ${bearerToken}`) {
+      return reply.status(401).send({
+        jsonrpc: "2.0",
+        error: {
+          code: -32001,
+          message: "Unauthorized"
+        },
+        id: null
+      });
+    }
+  }
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined
+  });
+  const server = createLeadResearchMcpServer({
+    apiBaseUrl: internalApiBaseUrl(),
+    publicApiBaseUrl: publicApiBaseUrl(request)
+  });
+
+  reply.hijack();
+  reply.raw.once("close", () => {
+    void Promise.allSettled([transport.close(), server.close()]);
+  });
+
+  try {
+    await server.connect(transport);
+    await transport.handleRequest(request.raw, reply.raw, request.body);
+  } catch (error) {
+    api.log.error({ err: error }, "Remote MCP request failed");
+    if (!reply.raw.headersSent) {
+      reply.raw.writeHead(500, { "content-type": "application/json" });
+      reply.raw.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: {
+            code: -32603,
+            message: "Internal server error"
+          },
+          id: null
+        })
+      );
+    } else if (!reply.raw.writableEnded) {
+      reply.raw.end();
+    }
+  }
+}
+
+function internalApiBaseUrl(): string {
+  const configured = process.env.MCP_INTERNAL_API_BASE_URL;
+  if (configured) return configured.replace(/\/$/, "");
+  return `http://127.0.0.1:${process.env.API_PORT ?? process.env.PORT ?? 4000}`;
+}
+
+function publicApiBaseUrl(request: FastifyRequest): string {
+  const explicit = firstHeader(request.headers["x-leadfactory-public-api-base-url"]);
+  if (explicit) return explicit.replace(/\/$/, "");
+
+  const configured = process.env.MCP_PUBLIC_API_BASE_URL;
+  if (configured) return configured.replace(/\/$/, "");
+
+  const forwardedHost = firstHeader(request.headers["x-forwarded-host"]);
+  const host = forwardedHost ?? firstHeader(request.headers.host);
+  if (!host) return internalApiBaseUrl();
+
+  const forwardedProto = firstHeader(request.headers["x-forwarded-proto"]) ?? "https";
+  const requestPath = request.url.split("?")[0]?.replace(/\/+$/, "") || "";
+  const apiPath = requestPath.endsWith("/mcp") ? requestPath.slice(0, -"/mcp".length) : "";
+  return `${forwardedProto}://${host}${apiPath}`.replace(/\/$/, "");
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  const first = Array.isArray(value) ? value[0] : value;
+  return first?.trim() || undefined;
+}
 
 function requiredEnv(name: string): string {
   const value = process.env[name];

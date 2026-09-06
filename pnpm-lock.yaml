@@ -42,6 +42,9 @@ importers:
       '@leadfactory/llm':
         specifier: workspace:*
         version: link:../../packages/llm
+      '@leadfactory/mcp-server':
+        specifier: workspace:*
+        version: link:../mcp-server
       '@leadfactory/proxy-manager':
         specifier: workspace:*
         version: link:../../packages/proxy-manager
@@ -60,6 +63,9 @@ importers:
       '@leadfactory/source-adapters':
         specifier: workspace:*
         version: link:../../packages/source-adapters
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(zod@4.4.3)
       dotenv:
         specifier: ^17.4.2
         version: 17.4.2
