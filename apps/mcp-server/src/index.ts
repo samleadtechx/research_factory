@@ -65,6 +65,51 @@ const emailVerificationOutputMappingInputSchema = z.object({
   riskyValues: z.array(z.string().min(1)).optional()
 });
 
+const runtimeSettingsInputSchema = z
+  .object({
+    redisUrl: z.string().min(1),
+    localLlmBaseUrl: z.string().min(1),
+    localLlmModel: z.string().min(1),
+    localLlmApiKey: z.string(),
+    appStorageDir: z.string().min(1),
+    serverUsagePercent: z.number().int().min(1).max(100),
+    maxBrowsersHardCap: z.number().int().min(1).max(200),
+    maxQwenConcurrency: z.number().int().min(1).max(64),
+    maxCampaignRuntimeMinutes: z.number().int().min(1).max(10080),
+    maxPagesPerLead: z.number().int().min(1).max(500),
+    proxyRetryCount: z.number().int().min(0).max(10),
+    browserFirst: z.boolean(),
+    maxDiscoveryResults: z.number().int().min(1).max(100000),
+    searchRetryCount: z.number().int().min(0).max(10),
+    browserHeadless: z.boolean(),
+    browserActionTimeoutMs: z.number().int().min(500).max(120000),
+    browserNavigationTimeoutMs: z.number().int().min(1000).max(180000),
+    maxActiveSourceRecipes: z.number().int().min(0).max(200),
+    sourceRecipeResultLimit: z.number().int().min(1).max(10000),
+    sourceRecipeMaxQueries: z.number().int().min(0).max(200),
+    sourceRecipeMaxSeeds: z.number().int().min(0).max(500),
+    sourceRecipeMaxPages: z.number().int().min(1).max(100),
+    sourceRecipeRetryCount: z.number().int().min(0).max(10),
+    sourceRecipeAutoActivateAfter: z.number().int().min(0).max(1000),
+    sourceRecipeAutoDisableAfter: z.number().int().min(0).max(1000),
+    maxActiveEnrichmentProviders: z.number().int().min(0).max(200),
+    maxActiveEmailVerificationProviders: z.number().int().min(0).max(100),
+    maxEmailsToVerifyPerLead: z.number().int().min(0).max(500),
+    providerAutoActivateAfter: z.number().int().min(0).max(1000),
+    providerAutoDisableAfter: z.number().int().min(0).max(1000),
+    providerEnforceRateLimits: z.boolean(),
+    providerMaxRateDelayMs: z.number().int().min(0).max(300000),
+    qwenTimeoutMs: z.number().int().min(1000).max(600000),
+    qwenMaxSourceChars: z.number().int().min(1000).max(1000000),
+    debugBrowserHeadless: z.union([z.boolean(), z.literal("virtual")]),
+    debugBrowserMaxSessions: z.number().int().min(1).max(50),
+    debugBrowserActionTimeoutMs: z.number().int().min(500).max(120000),
+    debugBrowserNavigationTimeoutMs: z.number().int().min(1000).max(180000),
+    debugBrowserConnectTimeoutMs: z.number().int().min(1000).max(180000),
+    debugBrowserMaxTextChars: z.number().int().min(1000).max(500000)
+  })
+  .partial();
+
 server.registerTool(
   "create_campaign",
   {
@@ -78,6 +123,26 @@ server.registerTool(
     }
   },
   async (input) => jsonResult(await postJson("/campaigns", input))
+);
+
+server.registerTool(
+  "get_runtime_settings",
+  {
+    title: "Get Runtime Settings",
+    description: "Read database-backed runtime settings used by API, workers, Qwen, providers, and debug browsers.",
+    inputSchema: {}
+  },
+  async () => jsonResult(await getJson("/settings/runtime"))
+);
+
+server.registerTool(
+  "update_runtime_settings",
+  {
+    title: "Update Runtime Settings",
+    description: "Update database-backed runtime settings. Some queue concurrency changes may require worker restart.",
+    inputSchema: runtimeSettingsInputSchema.shape
+  },
+  async (input) => jsonResult(await postJson("/settings/runtime", input))
 );
 
 server.registerTool(

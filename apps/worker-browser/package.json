@@ -15,6 +15,7 @@
     "@leadfactory/document-store": "workspace:*",
     "@leadfactory/queue": "workspace:*",
     "@leadfactory/resource-governor": "workspace:*",
+    "@leadfactory/runtime-config": "workspace:*",
     "@leadfactory/schemas": "workspace:*",
     "@leadfactory/source-adapters": "workspace:*",
     "bullmq": "^5.66.0",

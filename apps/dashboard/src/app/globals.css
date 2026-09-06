@@ -24,7 +24,8 @@ body {
 
 button,
 textarea,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -186,7 +187,8 @@ textarea {
 }
 
 textarea:focus,
-input:focus {
+input:focus,
+select:focus {
   border-color: var(--blue);
   outline: none;
 }
@@ -424,11 +426,81 @@ input[type="range"] {
   grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.05fr);
 }
 
+.runtimePanel,
 .proxyPanel {
   border: 1px solid var(--line);
   border-radius: 8px;
   margin-bottom: 16px;
   padding: 14px;
+}
+
+.runtimeForm {
+  display: grid;
+  gap: 14px;
+}
+
+.runtimeGroup {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.runtimeGroup:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.runtimeGroup h3 {
+  font-size: 13px;
+  margin: 0;
+}
+
+.runtimeGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.runtimeField,
+.runtimeToggle {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.runtimeField span,
+.runtimeToggle span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.runtimeField input,
+.runtimeField select {
+  background: #f9fbfd;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  min-height: 36px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.runtimeToggle {
+  align-content: space-between;
+  background: #f9fbfd;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-height: 58px;
+  padding: 9px 10px;
+}
+
+.runtimeToggle input {
+  accent-color: var(--blue);
+  height: 18px;
+  width: 18px;
 }
 
 .providerPanel {
@@ -793,6 +865,7 @@ th {
   .hardwareGrid,
   .moduleGrid,
   .providerSummaryGrid,
+  .runtimeGrid,
   .proxyUploadGrid {
     grid-template-columns: 1fr;
   }

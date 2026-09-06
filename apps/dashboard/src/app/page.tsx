@@ -141,6 +141,56 @@ type ProxyListResponse = {
   };
 };
 
+type DebugBrowserHeadless = boolean | "virtual";
+
+type RuntimeSettings = {
+  redisUrl: string;
+  localLlmBaseUrl: string;
+  localLlmModel: string;
+  localLlmApiKey: string;
+  appStorageDir: string;
+  serverUsagePercent: number;
+  maxBrowsersHardCap: number;
+  maxQwenConcurrency: number;
+  maxCampaignRuntimeMinutes: number;
+  maxPagesPerLead: number;
+  proxyRetryCount: number;
+  browserFirst: boolean;
+  maxDiscoveryResults: number;
+  searchRetryCount: number;
+  browserHeadless: boolean;
+  browserActionTimeoutMs: number;
+  browserNavigationTimeoutMs: number;
+  maxActiveSourceRecipes: number;
+  sourceRecipeResultLimit: number;
+  sourceRecipeMaxQueries: number;
+  sourceRecipeMaxSeeds: number;
+  sourceRecipeMaxPages: number;
+  sourceRecipeRetryCount: number;
+  sourceRecipeAutoActivateAfter: number;
+  sourceRecipeAutoDisableAfter: number;
+  maxActiveEnrichmentProviders: number;
+  maxActiveEmailVerificationProviders: number;
+  maxEmailsToVerifyPerLead: number;
+  providerAutoActivateAfter: number;
+  providerAutoDisableAfter: number;
+  providerEnforceRateLimits: boolean;
+  providerMaxRateDelayMs: number;
+  qwenTimeoutMs: number;
+  qwenMaxSourceChars: number;
+  debugBrowserHeadless: DebugBrowserHeadless;
+  debugBrowserMaxSessions: number;
+  debugBrowserActionTimeoutMs: number;
+  debugBrowserNavigationTimeoutMs: number;
+  debugBrowserConnectTimeoutMs: number;
+  debugBrowserMaxTextChars: number;
+};
+
+type RuntimeSettingsResponse = {
+  settings: RuntimeSettings;
+  defaults: RuntimeSettings;
+};
+
 type ProviderStatus = "trial" | "active" | "disabled";
 
 type SourceRecipeSummary = {
@@ -263,19 +313,22 @@ Operating model:
 - Codex should use MCP tools instead of manually operating browsers.
 
 Normal workflow:
-1. Check system_stats before creating a campaign.
-2. Create campaigns from the user's ICP prompt with create_campaign.
-3. Use strict evidence. Unknown is better than guessed.
-4. Inspect reusable providers with list_source_recipes, list_enrichment_providers, and list_email_verification_providers before creating new ones.
-5. When a source needs custom browser handling, start Camoufox with start_debug_browser and inspect it with debug_browser_snapshot/open/click/type/extract/screenshot.
-6. Convert the debug trail into a source recipe draft with debug_browser_recipe_draft, then save it with create_source_recipe.
-7. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Keep API keys in env vars and reference them as {env:VAR_NAME}.
-8. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
-9. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
-10. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
-11. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
+1. Check get_runtime_settings, system_health, and system_stats before creating a campaign.
+2. Update Redis, Qwen, storage, browser, capacity, and provider runtime settings with update_runtime_settings when the user asks.
+3. Create campaigns from the user's ICP prompt with create_campaign.
+4. Use strict evidence. Unknown is better than guessed.
+5. Inspect reusable providers with list_source_recipes, list_enrichment_providers, and list_email_verification_providers before creating new ones.
+6. When a source needs custom browser handling, start Camoufox with start_debug_browser and inspect it with debug_browser_snapshot/open/click/type/extract/screenshot.
+7. Convert the debug trail into a source recipe draft with debug_browser_recipe_draft, then save it with create_source_recipe.
+8. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Store reusable provider credentials in provider templates or server secrets.
+9. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
+10. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
+11. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
+12. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
 
 Currently wired MCP tools:
+- get_runtime_settings
+- update_runtime_settings
 - create_campaign
 - create_source_recipe
 - list_source_recipes
@@ -342,6 +395,11 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [isRefreshingHealth, setIsRefreshingHealth] = useState(false);
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null);
+  const [runtimeDefaults, setRuntimeDefaults] = useState<RuntimeSettings | null>(null);
+  const [runtimeSettingsError, setRuntimeSettingsError] = useState<string | null>(null);
+  const [runtimeSettingsResult, setRuntimeSettingsResult] = useState<string | null>(null);
+  const [isSavingRuntimeSettings, setIsSavingRuntimeSettings] = useState(false);
   const [proxyText, setProxyText] = useState("");
   const [proxyList, setProxyList] = useState<ProxyListResponse | null>(null);
   const [proxyResult, setProxyResult] = useState<string | null>(null);
@@ -404,7 +462,7 @@ export default function DashboardPage() {
   }, []);
 
   async function refreshAll() {
-    await Promise.all([refreshCampaigns(), refreshHealth(), refreshProxies(), refreshSourceRecipes()]);
+    await Promise.all([refreshCampaigns(), refreshHealth(), refreshRuntimeSettings(), refreshProxies(), refreshSourceRecipes()]);
   }
 
   async function refreshCampaigns() {
@@ -473,6 +531,47 @@ export default function DashboardPage() {
     } finally {
       setIsRefreshingHealth(false);
     }
+  }
+
+  async function refreshRuntimeSettings() {
+    setRuntimeSettingsError(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/settings/runtime`);
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as RuntimeSettingsResponse;
+      setRuntimeSettings(payload.settings);
+      setRuntimeDefaults(payload.defaults);
+    } catch (caught) {
+      setRuntimeSettingsError(caught instanceof Error ? caught.message : "Settings failed to load");
+    }
+  }
+
+  async function saveRuntimeSettings() {
+    if (!runtimeSettings) return;
+    setIsSavingRuntimeSettings(true);
+    setRuntimeSettingsError(null);
+    setRuntimeSettingsResult(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/settings/runtime`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(runtimeSettings)
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as RuntimeSettingsResponse;
+      setRuntimeSettings(payload.settings);
+      setRuntimeDefaults(payload.defaults);
+      setRuntimeSettingsResult("Settings saved");
+      await refreshHealth();
+    } catch (caught) {
+      setRuntimeSettingsError(caught instanceof Error ? caught.message : "Settings save failed");
+    } finally {
+      setIsSavingRuntimeSettings(false);
+    }
+  }
+
+  function updateRuntimeSetting<Key extends keyof RuntimeSettings>(key: Key, value: RuntimeSettings[Key]) {
+    setRuntimeSettings((current) => (current ? { ...current, [key]: value } : current));
   }
 
   async function refreshProxies() {
@@ -796,6 +895,279 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        <div className="runtimePanel">
+          <div className="sectionHeader">
+            <div>
+              <h2>Runtime Settings</h2>
+              <span>{runtimeSettings ? "Saved in database" : "Waiting for API"}</span>
+            </div>
+            <div className="copyActions">
+              <button className="copyButton" onClick={refreshRuntimeSettings}>
+                <RefreshCw size={16} />
+                <span>Reload</span>
+              </button>
+              <button
+                className="copyButton"
+                onClick={() => runtimeDefaults && setRuntimeSettings(runtimeDefaults)}
+                disabled={!runtimeDefaults}
+              >
+                <Settings size={16} />
+                <span>Defaults</span>
+              </button>
+              <button className="copyButton primaryCopy" onClick={saveRuntimeSettings} disabled={!runtimeSettings || isSavingRuntimeSettings}>
+                <Check size={16} />
+                <span>{isSavingRuntimeSettings ? "Saving" : "Save"}</span>
+              </button>
+            </div>
+          </div>
+
+          {runtimeSettingsError ? <pre className="error">{runtimeSettingsError}</pre> : null}
+          {runtimeSettingsResult ? <span className="successText">{runtimeSettingsResult}</span> : null}
+
+          {runtimeSettings ? (
+            <div className="runtimeForm">
+              <div className="runtimeGroup">
+                <h3>Core</h3>
+                <div className="runtimeGrid">
+                  <RuntimeTextInput
+                    label="Redis URL"
+                    value={runtimeSettings.redisUrl}
+                    onChange={(value) => updateRuntimeSetting("redisUrl", value)}
+                  />
+                  <RuntimeTextInput
+                    label="Qwen Base URL"
+                    value={runtimeSettings.localLlmBaseUrl}
+                    onChange={(value) => updateRuntimeSetting("localLlmBaseUrl", value)}
+                  />
+                  <RuntimeTextInput
+                    label="Qwen Model"
+                    value={runtimeSettings.localLlmModel}
+                    onChange={(value) => updateRuntimeSetting("localLlmModel", value)}
+                  />
+                  <RuntimeTextInput
+                    label="Qwen API Key"
+                    value={runtimeSettings.localLlmApiKey}
+                    type="password"
+                    onChange={(value) => updateRuntimeSetting("localLlmApiKey", value)}
+                  />
+                  <RuntimeTextInput
+                    label="Storage Dir"
+                    value={runtimeSettings.appStorageDir}
+                    onChange={(value) => updateRuntimeSetting("appStorageDir", value)}
+                  />
+                </div>
+              </div>
+
+              <div className="runtimeGroup">
+                <h3>Capacity</h3>
+                <div className="runtimeGrid">
+                  <RuntimeNumberInput
+                    label="Server Usage %"
+                    value={runtimeSettings.serverUsagePercent}
+                    onChange={(value) => updateRuntimeSetting("serverUsagePercent", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Max Browsers"
+                    value={runtimeSettings.maxBrowsersHardCap}
+                    onChange={(value) => updateRuntimeSetting("maxBrowsersHardCap", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Max Qwen"
+                    value={runtimeSettings.maxQwenConcurrency}
+                    onChange={(value) => updateRuntimeSetting("maxQwenConcurrency", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Runtime Min"
+                    value={runtimeSettings.maxCampaignRuntimeMinutes}
+                    onChange={(value) => updateRuntimeSetting("maxCampaignRuntimeMinutes", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Pages / Lead"
+                    value={runtimeSettings.maxPagesPerLead}
+                    onChange={(value) => updateRuntimeSetting("maxPagesPerLead", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Proxy Retries"
+                    value={runtimeSettings.proxyRetryCount}
+                    onChange={(value) => updateRuntimeSetting("proxyRetryCount", value)}
+                  />
+                </div>
+              </div>
+
+              <div className="runtimeGroup">
+                <h3>Browser</h3>
+                <div className="runtimeGrid">
+                  <RuntimeToggle
+                    label="Browser First"
+                    checked={runtimeSettings.browserFirst}
+                    onChange={(value) => updateRuntimeSetting("browserFirst", value)}
+                  />
+                  <RuntimeToggle
+                    label="Headless"
+                    checked={runtimeSettings.browserHeadless}
+                    onChange={(value) => updateRuntimeSetting("browserHeadless", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Discovery Limit"
+                    value={runtimeSettings.maxDiscoveryResults}
+                    onChange={(value) => updateRuntimeSetting("maxDiscoveryResults", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Search Retries"
+                    value={runtimeSettings.searchRetryCount}
+                    onChange={(value) => updateRuntimeSetting("searchRetryCount", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Action Timeout"
+                    value={runtimeSettings.browserActionTimeoutMs}
+                    onChange={(value) => updateRuntimeSetting("browserActionTimeoutMs", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Nav Timeout"
+                    value={runtimeSettings.browserNavigationTimeoutMs}
+                    onChange={(value) => updateRuntimeSetting("browserNavigationTimeoutMs", value)}
+                  />
+                </div>
+              </div>
+
+              <div className="runtimeGroup">
+                <h3>Providers</h3>
+                <div className="runtimeGrid">
+                  <RuntimeNumberInput
+                    label="Source Recipes"
+                    value={runtimeSettings.maxActiveSourceRecipes}
+                    onChange={(value) => updateRuntimeSetting("maxActiveSourceRecipes", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Recipe Results"
+                    value={runtimeSettings.sourceRecipeResultLimit}
+                    onChange={(value) => updateRuntimeSetting("sourceRecipeResultLimit", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Recipe Queries"
+                    value={runtimeSettings.sourceRecipeMaxQueries}
+                    onChange={(value) => updateRuntimeSetting("sourceRecipeMaxQueries", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Recipe Seeds"
+                    value={runtimeSettings.sourceRecipeMaxSeeds}
+                    onChange={(value) => updateRuntimeSetting("sourceRecipeMaxSeeds", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Recipe Pages"
+                    value={runtimeSettings.sourceRecipeMaxPages}
+                    onChange={(value) => updateRuntimeSetting("sourceRecipeMaxPages", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Recipe Retries"
+                    value={runtimeSettings.sourceRecipeRetryCount}
+                    onChange={(value) => updateRuntimeSetting("sourceRecipeRetryCount", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Recipe Auto Active"
+                    value={runtimeSettings.sourceRecipeAutoActivateAfter}
+                    onChange={(value) => updateRuntimeSetting("sourceRecipeAutoActivateAfter", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Recipe Auto Disable"
+                    value={runtimeSettings.sourceRecipeAutoDisableAfter}
+                    onChange={(value) => updateRuntimeSetting("sourceRecipeAutoDisableAfter", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Enrichment APIs"
+                    value={runtimeSettings.maxActiveEnrichmentProviders}
+                    onChange={(value) => updateRuntimeSetting("maxActiveEnrichmentProviders", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Email Verify APIs"
+                    value={runtimeSettings.maxActiveEmailVerificationProviders}
+                    onChange={(value) => updateRuntimeSetting("maxActiveEmailVerificationProviders", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Emails / Lead"
+                    value={runtimeSettings.maxEmailsToVerifyPerLead}
+                    onChange={(value) => updateRuntimeSetting("maxEmailsToVerifyPerLead", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Provider Auto Active"
+                    value={runtimeSettings.providerAutoActivateAfter}
+                    onChange={(value) => updateRuntimeSetting("providerAutoActivateAfter", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Provider Auto Disable"
+                    value={runtimeSettings.providerAutoDisableAfter}
+                    onChange={(value) => updateRuntimeSetting("providerAutoDisableAfter", value)}
+                  />
+                  <RuntimeToggle
+                    label="Rate Limits"
+                    checked={runtimeSettings.providerEnforceRateLimits}
+                    onChange={(value) => updateRuntimeSetting("providerEnforceRateLimits", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Max Rate Delay"
+                    value={runtimeSettings.providerMaxRateDelayMs}
+                    onChange={(value) => updateRuntimeSetting("providerMaxRateDelayMs", value)}
+                  />
+                </div>
+              </div>
+
+              <div className="runtimeGroup">
+                <h3>Analysis</h3>
+                <div className="runtimeGrid">
+                  <RuntimeNumberInput
+                    label="Qwen Timeout"
+                    value={runtimeSettings.qwenTimeoutMs}
+                    onChange={(value) => updateRuntimeSetting("qwenTimeoutMs", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Source Chars"
+                    value={runtimeSettings.qwenMaxSourceChars}
+                    onChange={(value) => updateRuntimeSetting("qwenMaxSourceChars", value)}
+                  />
+                </div>
+              </div>
+
+              <div className="runtimeGroup">
+                <h3>Debug Browser</h3>
+                <div className="runtimeGrid">
+                  <RuntimeHeadlessSelect
+                    label="Debug Headless"
+                    value={runtimeSettings.debugBrowserHeadless}
+                    onChange={(value) => updateRuntimeSetting("debugBrowserHeadless", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Debug Sessions"
+                    value={runtimeSettings.debugBrowserMaxSessions}
+                    onChange={(value) => updateRuntimeSetting("debugBrowserMaxSessions", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Debug Action"
+                    value={runtimeSettings.debugBrowserActionTimeoutMs}
+                    onChange={(value) => updateRuntimeSetting("debugBrowserActionTimeoutMs", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Debug Nav"
+                    value={runtimeSettings.debugBrowserNavigationTimeoutMs}
+                    onChange={(value) => updateRuntimeSetting("debugBrowserNavigationTimeoutMs", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Debug Connect"
+                    value={runtimeSettings.debugBrowserConnectTimeoutMs}
+                    onChange={(value) => updateRuntimeSetting("debugBrowserConnectTimeoutMs", value)}
+                  />
+                  <RuntimeNumberInput
+                    label="Debug Text"
+                    value={runtimeSettings.debugBrowserMaxTextChars}
+                    onChange={(value) => updateRuntimeSetting("debugBrowserMaxTextChars", value)}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="emptyState">Runtime settings will appear when the API is running.</div>
+          )}
+        </div>
+
         <div className="proxyPanel" id="proxies">
           <div className="sectionHeader">
             <div>
@@ -1094,6 +1466,87 @@ function HealthMetric({
   );
 }
 
+function RuntimeTextInput({
+  label,
+  value,
+  type = "text",
+  onChange
+}: {
+  label: string;
+  value: string;
+  type?: "text" | "password";
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="runtimeField">
+      <span>{label}</span>
+      <input type={type} value={value} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function RuntimeNumberInput({
+  label,
+  value,
+  onChange
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="runtimeField">
+      <span>{label}</span>
+      <input
+        type="number"
+        value={String(value)}
+        onChange={(event) => {
+          const parsed = Number(event.target.value);
+          if (Number.isFinite(parsed)) onChange(parsed);
+        }}
+      />
+    </label>
+  );
+}
+
+function RuntimeToggle({
+  label,
+  checked,
+  onChange
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="runtimeToggle">
+      <span>{label}</span>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+    </label>
+  );
+}
+
+function RuntimeHeadlessSelect({
+  label,
+  value,
+  onChange
+}: {
+  label: string;
+  value: DebugBrowserHeadless;
+  onChange: (value: DebugBrowserHeadless) => void;
+}) {
+  return (
+    <label className="runtimeField">
+      <span>{label}</span>
+      <select value={debugHeadlessToString(value)} onChange={(event) => onChange(debugHeadlessFromString(event.target.value))}>
+        <option value="virtual">virtual</option>
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    </label>
+  );
+}
+
 function formatBytes(value?: number): string {
   if (!value || value < 0) return "-";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -1175,6 +1628,16 @@ function providerEndpoint(type: DataProviderRow["type"]): ProviderEndpoint {
     case "Email Verify":
       return "email-verification-providers";
   }
+}
+
+function debugHeadlessToString(value: DebugBrowserHeadless): string {
+  if (value === "virtual") return "virtual";
+  return value ? "true" : "false";
+}
+
+function debugHeadlessFromString(value: string): DebugBrowserHeadless {
+  if (value === "virtual") return "virtual";
+  return value === "true";
 }
 
 function statusLabel(status: ModuleHealth["status"]): string {

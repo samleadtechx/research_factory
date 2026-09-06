@@ -33,12 +33,12 @@ export type ServerHealth = {
   modules: ModuleHealth[];
 };
 
-export async function probeSystemCapacity(): Promise<SystemCapacity> {
+export async function probeSystemCapacity(storagePath = process.env.APP_STORAGE_DIR ?? process.cwd()): Promise<SystemCapacity> {
   const [cpuCores, memory, gpu, disk] = await Promise.all([
     readCpuCores(),
     readMemory(),
     readGpu(),
-    readDiskUsage(process.env.APP_STORAGE_DIR ?? process.cwd())
+    readDiskUsage(storagePath)
   ]);
   const loadAverage1m = os.loadavg()[0];
   const cpuUsagePercent = Math.min(100, Math.round((loadAverage1m / cpuCores) * 1000) / 10);

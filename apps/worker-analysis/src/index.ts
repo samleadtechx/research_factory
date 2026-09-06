@@ -4,11 +4,12 @@ import { prisma, Prisma } from "@leadfactory/database";
 import { OpenAICompatibleLLMProvider } from "@leadfactory/llm";
 import { createRedisConnection, queueNames, type AnalysisPayload } from "@leadfactory/queue";
 import { calculateWorkerLimits, probeSystemCapacity } from "@leadfactory/resource-governor";
+import { defaultRuntimeSettings, readRuntimeSettings } from "@leadfactory/runtime-config";
 import {
   CampaignPlanSchema,
-  ServerSettingsSchema,
   type CampaignPlan,
   type Claim,
+  type RuntimeSettings,
   type ScoringRule
 } from "@leadfactory/schemas";
 import { scoreClaims } from "@leadfactory/scoring";
@@ -130,13 +131,15 @@ const LeadAnalysisSchema = z.object({
 
 type LeadAnalysis = z.infer<typeof LeadAnalysisSchema>;
 
-const redisUrl = requiredEnv("REDIS_URL");
-const model = process.env.LOCAL_LLM_MODEL ?? "qwen2.5:14b";
+let runtimeSettings: RuntimeSettings = defaultRuntimeSettings();
+let model = runtimeSettings.localLlmModel;
 
 export async function main() {
+  runtimeSettings = await readRuntimeSettings();
+  model = runtimeSettings.localLlmModel;
   const limits = await resolveWorkerLimits();
   const worker = new Worker<AnalysisPayload>(queueNames.qwenAnalysis, processAnalysisJob, {
-    connection: createRedisConnection(redisUrl),
+    connection: createRedisConnection(runtimeSettings.redisUrl),
     concurrency: limits.maxAnalysisConcurrency
   });
 
@@ -170,6 +173,8 @@ export async function main() {
 }
 
 async function processAnalysisJob(job: Job<AnalysisPayload>) {
+  runtimeSettings = await readRuntimeSettings();
+  model = runtimeSettings.localLlmModel;
   const campaign = await prisma.campaign.findUnique({ where: { id: job.data.campaignId } });
   if (!campaign || ["paused", "cancelled", "completed", "failed"].includes(campaign.status)) {
     await markResearchJob(job.data.researchJobId, "completed", {
@@ -457,10 +462,10 @@ async function runQwenAnalysis(params: {
   fallbackEvidence: Array<{ id: string; field: string | null; quote: string; url: string }>;
 }): Promise<LeadAnalysis> {
   const llm = new OpenAICompatibleLLMProvider({
-    baseUrl: requiredEnv("LOCAL_LLM_BASE_URL"),
+    baseUrl: runtimeSettings.localLlmBaseUrl,
     model,
-    apiKey: process.env.LOCAL_LLM_API_KEY ?? "local",
-    timeoutMs: Number(process.env.QWEN_TIMEOUT_MS ?? 120000)
+    apiKey: runtimeSettings.localLlmApiKey,
+    timeoutMs: runtimeSettings.qwenTimeoutMs
   });
 
   try {
@@ -504,7 +509,7 @@ async function runActiveEnrichmentProviders(params: {
       ]
     },
     orderBy: [{ successCount: "desc" }, { updatedAt: "desc" }],
-    take: Number(process.env.MAX_ACTIVE_ENRICHMENT_PROVIDERS ?? 5)
+    take: runtimeSettings.maxActiveEnrichmentProviders
   });
 
   const results: EnrichmentResult[] = [];
@@ -570,7 +575,7 @@ async function runActiveEmailVerificationProviders(params: {
 }): Promise<EmailVerificationResult[]> {
   const emails = [...new Set(params.emails.map(normalizeEmail).filter((email): email is string => Boolean(email)))].slice(
     0,
-    Number(process.env.MAX_EMAILS_TO_VERIFY_PER_LEAD ?? 10)
+    runtimeSettings.maxEmailsToVerifyPerLead
   );
   if (!emails.length) return [];
 
@@ -583,7 +588,7 @@ async function runActiveEmailVerificationProviders(params: {
       ]
     },
     orderBy: [{ successCount: "desc" }, { updatedAt: "desc" }],
-    take: Number(process.env.MAX_ACTIVE_EMAIL_VERIFICATION_PROVIDERS ?? 3)
+    take: runtimeSettings.maxActiveEmailVerificationProviders
   });
 
   const results: EmailVerificationResult[] = [];
@@ -1134,22 +1139,15 @@ async function markResearchJob(
 }
 
 async function resolveWorkerLimits() {
-  const settings = ServerSettingsSchema.parse({
-    serverUsagePercent: Number(process.env.SERVER_USAGE_PERCENT ?? 60),
-    maxBrowsersHardCap: Number(process.env.MAX_BROWSERS_HARD_CAP ?? 40),
-    maxQwenConcurrency: Number(process.env.MAX_QWEN_CONCURRENCY ?? 4),
-    maxCampaignRuntimeMinutes: Number(process.env.MAX_CAMPAIGN_RUNTIME_MINUTES ?? 240),
-    maxPagesPerLead: Number(process.env.MAX_PAGES_PER_LEAD ?? 25),
-    proxyRetryCount: Number(process.env.PROXY_RETRY_COUNT ?? 2),
-    browserFirst: process.env.BROWSER_FIRST !== "false"
-  });
+  runtimeSettings = await readRuntimeSettings();
+  model = runtimeSettings.localLlmModel;
   const [capacity, usableProxyCount] = await Promise.all([
-    probeSystemCapacity(),
+    probeSystemCapacity(runtimeSettings.appStorageDir),
     prisma.proxy.count({ where: { status: { in: ["healthy", "untested", "degraded"] } } })
   ]);
 
   return calculateWorkerLimits({
-    settings,
+    settings: runtimeSettings,
     capacity,
     healthyProxyCount: usableProxyCount,
     qwenHealthy: true
@@ -1289,7 +1287,7 @@ function parseCampaignPlan(value: unknown, prompt: string, campaignName: string)
 }
 
 function buildSourcePack(documents: SourceDocument[]): string {
-  const maxChars = Number(process.env.QWEN_MAX_SOURCE_CHARS ?? 45000);
+  const maxChars = runtimeSettings.qwenMaxSourceChars;
   let remaining = maxChars;
   const chunks: string[] = [];
 
@@ -1740,19 +1738,19 @@ function missingEnvVars(names: string[]): string[] {
 }
 
 function shouldAutoActivateProvider(provider: SavedProviderRecord): boolean {
-  const threshold = Number(process.env.PROVIDER_AUTO_ACTIVATE_AFTER ?? 3);
+  const threshold = runtimeSettings.providerAutoActivateAfter;
   return provider.status === "trial" && threshold > 0 && provider.successCount + 1 >= threshold;
 }
 
 function shouldAutoDisableProvider(provider: SavedProviderRecord): boolean {
-  const threshold = Number(process.env.PROVIDER_AUTO_DISABLE_AFTER ?? 10);
+  const threshold = runtimeSettings.providerAutoDisableAfter;
   return provider.status !== "disabled" && provider.successCount === 0 && threshold > 0 && provider.failureCount + 1 >= threshold;
 }
 
 async function waitForProviderRateLimit(rateLimitPerMinute: number) {
-  if (process.env.PROVIDER_ENFORCE_RATE_LIMITS === "false") return;
+  if (!runtimeSettings.providerEnforceRateLimits) return;
   const delayMs = Math.ceil(60_000 / Math.max(1, rateLimitPerMinute));
-  const cappedDelayMs = Math.min(delayMs, Number(process.env.PROVIDER_MAX_RATE_DELAY_MS ?? 30_000));
+  const cappedDelayMs = Math.min(delayMs, runtimeSettings.providerMaxRateDelayMs);
   if (cappedDelayMs > 50) await sleep(cappedDelayMs);
 }
 
@@ -1833,12 +1831,6 @@ function hashText(value: string): string {
 function clamp01(value: number): number {
   if (Number.isNaN(value)) return 0;
   return Math.max(0, Math.min(1, value));
-}
-
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required env var ${name}`);
-  return value;
 }
 
 function waitForShutdown(cleanup: () => Promise<void>): Promise<void> {

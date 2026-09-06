@@ -19,6 +19,7 @@
       "@leadfactory/proxy-manager": ["packages/proxy-manager/src/index.ts"],
       "@leadfactory/queue": ["packages/queue/src/index.ts"],
       "@leadfactory/resource-governor": ["packages/resource-governor/src/index.ts"],
+      "@leadfactory/runtime-config": ["packages/runtime-config/src/index.ts"],
       "@leadfactory/schemas": ["packages/schemas/src/index.ts"],
       "@leadfactory/scoring": ["packages/scoring/src/index.ts"],
       "@leadfactory/source-adapters": ["packages/source-adapters/src/index.ts"]

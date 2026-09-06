@@ -1,6 +1,8 @@
 # Operator Scripts
 
 These scripts work on Linux and macOS.
+Only `DATABASE_URL` is required in `.env`; the rest of the runtime settings are
+managed in the dashboard Settings panel.
 
 ```bash
 scripts/install.sh

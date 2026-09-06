@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { prisma } from "@leadfactory/database";
+import type { RuntimeSettings } from "@leadfactory/schemas";
 import { chromium, firefox, type Browser, type BrowserContext, type Page } from "playwright";
 import { z } from "zod";
 
@@ -123,7 +124,19 @@ type PlaywrightProxy = {
 type DebugBrowserControllerOptions = {
   rootDir: string;
   storageDir: string;
+  getSettings?: () => Promise<RuntimeSettings>;
 };
+
+type DebugBrowserRuntimeSettings = Pick<
+  RuntimeSettings,
+  | "appStorageDir"
+  | "debugBrowserActionTimeoutMs"
+  | "debugBrowserConnectTimeoutMs"
+  | "debugBrowserHeadless"
+  | "debugBrowserMaxSessions"
+  | "debugBrowserMaxTextChars"
+  | "debugBrowserNavigationTimeoutMs"
+>;
 
 type DebugSnapshot = {
   sessionId: string;
@@ -209,10 +222,12 @@ class DebugBrowserController {
   private readonly sessions = new Map<string, DebugBrowserSession>();
   private readonly rootDir: string;
   private readonly storageDir: string;
+  private readonly getSettings?: () => Promise<RuntimeSettings>;
 
   constructor(options: DebugBrowserControllerOptions) {
     this.rootDir = options.rootDir;
     this.storageDir = resolveStorageDir(options.rootDir, options.storageDir);
+    this.getSettings = options.getSettings;
   }
 
   list() {
@@ -228,17 +243,18 @@ class DebugBrowserController {
 
   async start(rawInput: unknown) {
     const input = StartDebugBrowserInputSchema.parse(rawInput ?? {});
-    const maxSessions = Number(process.env.DEBUG_BROWSER_MAX_SESSIONS ?? 3);
+    const settings = await this.settings();
+    const maxSessions = settings.debugBrowserMaxSessions;
     if (this.sessions.size >= maxSessions) {
       throw new Error(`Debug browser session limit reached (${maxSessions}). Close a session before starting another.`);
     }
 
     const proxy = await this.selectProxy(input.proxyStrategy, input.proxyId);
-    const headless = input.headless ?? defaultHeadless();
+    const headless = input.headless ?? defaultHeadless(settings.debugBrowserHeadless);
     const launched =
       input.engine === "camoufox"
-        ? await this.launchCamoufox(input, proxy, headless)
-        : await this.launchPlaywright(proxy, headless);
+        ? await this.launchCamoufox(input, proxy, headless, settings)
+        : await this.launchPlaywright(proxy, headless, settings);
 
     const session: DebugBrowserSession = {
       id: randomUUID(),
@@ -274,6 +290,7 @@ class DebugBrowserController {
 
   async snapshot(sessionId: string): Promise<DebugSnapshot> {
     const session = this.requireSession(sessionId);
+    const settings = await this.settings();
     const pageState = (await session.page.evaluate(DEBUG_SNAPSHOT_SCRIPT)) as DebugPageState;
 
     session.updatedAt = new Date();
@@ -285,7 +302,7 @@ class DebugBrowserController {
       proxy: session.proxy,
       currentUrl,
       title: normalizeWhitespace(pageState.title),
-      text: normalizeWhitespace(pageState.text).slice(0, Number(process.env.DEBUG_BROWSER_MAX_TEXT_CHARS ?? 8000)),
+      text: normalizeWhitespace(pageState.text).slice(0, settings.debugBrowserMaxTextChars),
       links: pageState.links,
       controls: pageState.controls,
       trail: session.trail,
@@ -297,12 +314,13 @@ class DebugBrowserController {
   async open(sessionId: string, rawInput: unknown) {
     const input = DebugBrowserOpenInputSchema.parse(rawInput);
     const session = this.requireSession(sessionId);
+    const settings = await this.settings();
     const url = normalizeInputUrl(input.url);
     if (!url) throw new Error(`Invalid URL: ${input.url}`);
 
     await session.page.goto(url, {
       waitUntil: input.waitUntil,
-      timeout: Number(process.env.DEBUG_BROWSER_NAVIGATION_TIMEOUT_MS ?? 45000)
+      timeout: settings.debugBrowserNavigationTimeoutMs
     });
     await session.page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => undefined);
     this.addTrail(session, { action: "open_url", value: url });
@@ -312,13 +330,14 @@ class DebugBrowserController {
   async click(sessionId: string, rawInput: unknown) {
     const input = DebugBrowserClickInputSchema.parse(rawInput);
     const session = this.requireSession(sessionId);
+    const settings = await this.settings();
     const locator = session.page.locator(input.selector).first();
     await locator.waitFor({
       state: "visible",
-      timeout: input.timeoutMs ?? Number(process.env.DEBUG_BROWSER_ACTION_TIMEOUT_MS ?? 15000)
+      timeout: input.timeoutMs ?? settings.debugBrowserActionTimeoutMs
     });
     await locator.click({
-      timeout: input.timeoutMs ?? Number(process.env.DEBUG_BROWSER_ACTION_TIMEOUT_MS ?? 15000)
+      timeout: input.timeoutMs ?? settings.debugBrowserActionTimeoutMs
     });
     await session.page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => undefined);
     await session.page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
@@ -329,8 +348,9 @@ class DebugBrowserController {
   async type(sessionId: string, rawInput: unknown) {
     const input = DebugBrowserTypeInputSchema.parse(rawInput);
     const session = this.requireSession(sessionId);
+    const settings = await this.settings();
     const locator = session.page.locator(input.selector).first();
-    const timeout = input.timeoutMs ?? Number(process.env.DEBUG_BROWSER_ACTION_TIMEOUT_MS ?? 15000);
+    const timeout = input.timeoutMs ?? settings.debugBrowserActionTimeoutMs;
     await locator.waitFor({ state: "visible", timeout });
     if (input.clear) {
       await locator.fill(input.text, { timeout });
@@ -374,7 +394,8 @@ class DebugBrowserController {
   async screenshot(sessionId: string, rawInput: unknown) {
     const input = DebugBrowserScreenshotInputSchema.parse(rawInput ?? {});
     const session = this.requireSession(sessionId);
-    const screenshotDir = path.join(this.storageDir, "screenshots");
+    const settings = await this.settings();
+    const screenshotDir = path.join(resolveStorageDir(this.rootDir, settings.appStorageDir), "screenshots");
     await fs.mkdir(screenshotDir, { recursive: true });
     const screenshotPath = path.join(screenshotDir, `debug-${session.id}-${Date.now()}.png`);
     await session.page.screenshot({
@@ -418,7 +439,8 @@ class DebugBrowserController {
   private async launchCamoufox(
     input: DebugBrowserStartInput,
     proxy: ProxyRecord | null,
-    headless: DebugHeadless
+    headless: DebugHeadless,
+    settings: DebugBrowserRuntimeSettings
   ): Promise<LaunchedDebugBrowser> {
     const python = resolvePythonExecutable(this.rootDir);
     const launcher = path.join(this.rootDir, "scripts", "camoufox-server.py");
@@ -449,16 +471,16 @@ class DebugBrowserController {
       detached: process.platform !== "win32"
     });
     child.stdin.end(JSON.stringify(launchOptions));
-    const launch = await waitForCamoufoxEndpoint(child);
+    const launch = await waitForCamoufoxEndpoint(child, settings.debugBrowserConnectTimeoutMs);
     const browser = await firefox.connect(launch.wsEndpoint, {
-      timeout: Number(process.env.DEBUG_BROWSER_CONNECT_TIMEOUT_MS ?? 45000)
+      timeout: settings.debugBrowserConnectTimeoutMs
     });
     const context = await browser.newContext({
       acceptDownloads: false,
       ignoreHTTPSErrors: true
     });
     const page = await context.newPage();
-    page.setDefaultTimeout(Number(process.env.DEBUG_BROWSER_ACTION_TIMEOUT_MS ?? 15000));
+    page.setDefaultTimeout(settings.debugBrowserActionTimeoutMs);
 
     child.once("exit", () => {
       for (const [sessionId, session] of this.sessions.entries()) {
@@ -476,7 +498,11 @@ class DebugBrowserController {
     };
   }
 
-  private async launchPlaywright(proxy: ProxyRecord | null, headless: DebugHeadless): Promise<LaunchedDebugBrowser> {
+  private async launchPlaywright(
+    proxy: ProxyRecord | null,
+    headless: DebugHeadless,
+    settings: DebugBrowserRuntimeSettings
+  ): Promise<LaunchedDebugBrowser> {
     const browser = await chromium.launch({
       headless: headless === "virtual" ? true : headless,
       proxy: proxy ? playwrightProxy(proxy) : undefined
@@ -486,8 +512,20 @@ class DebugBrowserController {
       ignoreHTTPSErrors: true
     });
     const page = await context.newPage();
-    page.setDefaultTimeout(Number(process.env.DEBUG_BROWSER_ACTION_TIMEOUT_MS ?? 15000));
+    page.setDefaultTimeout(settings.debugBrowserActionTimeoutMs);
     return { browser, context, page };
+  }
+
+  private async settings(): Promise<DebugBrowserRuntimeSettings> {
+    if (this.getSettings) {
+      try {
+        return await this.getSettings();
+      } catch {
+        return fallbackDebugBrowserSettings(this.storageDir);
+      }
+    }
+
+    return fallbackDebugBrowserSettings(this.storageDir);
   }
 
   private async selectProxy(strategy: z.infer<typeof ProxyStrategySchema>, proxyId?: string): Promise<ProxyRecord | null> {
@@ -542,14 +580,14 @@ class DebugBrowserController {
   }
 }
 
-async function waitForCamoufoxEndpoint(child: ChildProcessWithoutNullStreams) {
+async function waitForCamoufoxEndpoint(child: ChildProcessWithoutNullStreams, timeoutMs: number) {
   let launchLog = "";
   return new Promise<{ wsEndpoint: string; launchLog: string }>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
       killProcess(child);
       reject(new Error(`Timed out waiting for Camoufox websocket endpoint.\n${launchLog}`));
-    }, Number(process.env.DEBUG_BROWSER_CONNECT_TIMEOUT_MS ?? 45000));
+    }, timeoutMs);
 
     const onData = (chunk: Buffer) => {
       launchLog += chunk.toString();
@@ -645,11 +683,20 @@ function renderExtractScript(input: DebugBrowserExtractInput): string {
 `;
 }
 
-function defaultHeadless(): DebugHeadless {
-  const configured = process.env.DEBUG_BROWSER_HEADLESS?.toLowerCase();
-  if (configured === "false" || configured === "0") return false;
-  if (configured === "true" || configured === "1") return true;
-  if (configured === "virtual") return "virtual";
+function fallbackDebugBrowserSettings(storageDir: string): DebugBrowserRuntimeSettings {
+  return {
+    appStorageDir: storageDir,
+    debugBrowserActionTimeoutMs: 15000,
+    debugBrowserConnectTimeoutMs: 45000,
+    debugBrowserHeadless: process.platform === "linux" && !process.env.DISPLAY ? "virtual" : false,
+    debugBrowserMaxSessions: 3,
+    debugBrowserMaxTextChars: 8000,
+    debugBrowserNavigationTimeoutMs: 45000
+  };
+}
+
+function defaultHeadless(configured: DebugHeadless): DebugHeadless {
+  if (configured === false || configured === true || configured === "virtual") return configured;
   return process.platform === "linux" && !process.env.DISPLAY ? "virtual" : false;
 }
 

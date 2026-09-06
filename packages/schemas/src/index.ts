@@ -73,6 +73,87 @@ export const ServerSettingsSchema = z.object({
   browserFirst: z.boolean().default(true)
 });
 
+export const DebugBrowserHeadlessSchema = z.union([z.boolean(), z.literal("virtual")]);
+
+export const RuntimeSettingsSchema = ServerSettingsSchema.extend({
+  redisUrl: z.string().trim().min(1).default("redis://localhost:6379"),
+  localLlmBaseUrl: z.string().trim().min(1).default("http://73.72.215.253:11434/v1"),
+  localLlmModel: z.string().trim().min(1).default("qwen2.5:14b"),
+  localLlmApiKey: z.string().default("local"),
+  appStorageDir: z.string().trim().min(1).default("./data"),
+  maxDiscoveryResults: z.number().int().min(1).max(100000).default(80),
+  searchRetryCount: z.number().int().min(0).max(10).default(2),
+  browserHeadless: z.boolean().default(true),
+  browserActionTimeoutMs: z.number().int().min(500).max(120000).default(15000),
+  browserNavigationTimeoutMs: z.number().int().min(1000).max(180000).default(45000),
+  maxActiveSourceRecipes: z.number().int().min(0).max(200).default(10),
+  sourceRecipeResultLimit: z.number().int().min(1).max(10000).default(60),
+  sourceRecipeMaxQueries: z.number().int().min(0).max(200).default(8),
+  sourceRecipeMaxSeeds: z.number().int().min(0).max(500).default(10),
+  sourceRecipeMaxPages: z.number().int().min(1).max(100).default(8),
+  sourceRecipeRetryCount: z.number().int().min(0).max(10).default(2),
+  sourceRecipeAutoActivateAfter: z.number().int().min(0).max(1000).default(3),
+  sourceRecipeAutoDisableAfter: z.number().int().min(0).max(1000).default(10),
+  maxActiveEnrichmentProviders: z.number().int().min(0).max(200).default(5),
+  maxActiveEmailVerificationProviders: z.number().int().min(0).max(100).default(3),
+  maxEmailsToVerifyPerLead: z.number().int().min(0).max(500).default(10),
+  providerAutoActivateAfter: z.number().int().min(0).max(1000).default(3),
+  providerAutoDisableAfter: z.number().int().min(0).max(1000).default(10),
+  providerEnforceRateLimits: z.boolean().default(true),
+  providerMaxRateDelayMs: z.number().int().min(0).max(300000).default(30000),
+  qwenTimeoutMs: z.number().int().min(1000).max(600000).default(120000),
+  qwenMaxSourceChars: z.number().int().min(1000).max(1000000).default(45000),
+  debugBrowserHeadless: DebugBrowserHeadlessSchema.default("virtual"),
+  debugBrowserMaxSessions: z.number().int().min(1).max(50).default(3),
+  debugBrowserActionTimeoutMs: z.number().int().min(500).max(120000).default(15000),
+  debugBrowserNavigationTimeoutMs: z.number().int().min(1000).max(180000).default(45000),
+  debugBrowserConnectTimeoutMs: z.number().int().min(1000).max(180000).default(45000),
+  debugBrowserMaxTextChars: z.number().int().min(1000).max(500000).default(8000)
+});
+
+export const RuntimeSettingsUpdateSchema = z.object({
+  redisUrl: z.string().trim().min(1).optional(),
+  localLlmBaseUrl: z.string().trim().min(1).optional(),
+  localLlmModel: z.string().trim().min(1).optional(),
+  localLlmApiKey: z.string().optional(),
+  appStorageDir: z.string().trim().min(1).optional(),
+  serverUsagePercent: z.number().int().min(1).max(100).optional(),
+  maxBrowsersHardCap: z.number().int().min(1).max(200).optional(),
+  maxQwenConcurrency: z.number().int().min(1).max(64).optional(),
+  maxCampaignRuntimeMinutes: z.number().int().min(1).max(10080).optional(),
+  maxPagesPerLead: z.number().int().min(1).max(500).optional(),
+  proxyRetryCount: z.number().int().min(0).max(10).optional(),
+  browserFirst: z.boolean().optional(),
+  maxDiscoveryResults: z.number().int().min(1).max(100000).optional(),
+  searchRetryCount: z.number().int().min(0).max(10).optional(),
+  browserHeadless: z.boolean().optional(),
+  browserActionTimeoutMs: z.number().int().min(500).max(120000).optional(),
+  browserNavigationTimeoutMs: z.number().int().min(1000).max(180000).optional(),
+  maxActiveSourceRecipes: z.number().int().min(0).max(200).optional(),
+  sourceRecipeResultLimit: z.number().int().min(1).max(10000).optional(),
+  sourceRecipeMaxQueries: z.number().int().min(0).max(200).optional(),
+  sourceRecipeMaxSeeds: z.number().int().min(0).max(500).optional(),
+  sourceRecipeMaxPages: z.number().int().min(1).max(100).optional(),
+  sourceRecipeRetryCount: z.number().int().min(0).max(10).optional(),
+  sourceRecipeAutoActivateAfter: z.number().int().min(0).max(1000).optional(),
+  sourceRecipeAutoDisableAfter: z.number().int().min(0).max(1000).optional(),
+  maxActiveEnrichmentProviders: z.number().int().min(0).max(200).optional(),
+  maxActiveEmailVerificationProviders: z.number().int().min(0).max(100).optional(),
+  maxEmailsToVerifyPerLead: z.number().int().min(0).max(500).optional(),
+  providerAutoActivateAfter: z.number().int().min(0).max(1000).optional(),
+  providerAutoDisableAfter: z.number().int().min(0).max(1000).optional(),
+  providerEnforceRateLimits: z.boolean().optional(),
+  providerMaxRateDelayMs: z.number().int().min(0).max(300000).optional(),
+  qwenTimeoutMs: z.number().int().min(1000).max(600000).optional(),
+  qwenMaxSourceChars: z.number().int().min(1000).max(1000000).optional(),
+  debugBrowserHeadless: DebugBrowserHeadlessSchema.optional(),
+  debugBrowserMaxSessions: z.number().int().min(1).max(50).optional(),
+  debugBrowserActionTimeoutMs: z.number().int().min(500).max(120000).optional(),
+  debugBrowserNavigationTimeoutMs: z.number().int().min(1000).max(180000).optional(),
+  debugBrowserConnectTimeoutMs: z.number().int().min(1000).max(180000).optional(),
+  debugBrowserMaxTextChars: z.number().int().min(1000).max(500000).optional()
+});
+
 export const CreateCampaignInputSchema = z.object({
   prompt: z.string().trim().min(20),
   name: z.string().trim().min(1).max(160).optional(),
@@ -217,6 +298,9 @@ export type CreateCampaignInput = z.infer<typeof CreateCampaignInputSchema>;
 export type ScoringRule = z.infer<typeof ScoringRuleSchema>;
 export type ProxyInput = z.infer<typeof ProxyInputSchema>;
 export type ServerSettings = z.infer<typeof ServerSettingsSchema>;
+export type DebugBrowserHeadless = z.infer<typeof DebugBrowserHeadlessSchema>;
+export type RuntimeSettings = z.infer<typeof RuntimeSettingsSchema>;
+export type RuntimeSettingsUpdate = z.infer<typeof RuntimeSettingsUpdateSchema>;
 export type Evidence = z.infer<typeof EvidenceSchema>;
 export type Claim = z.infer<typeof ClaimSchema>;
 export type LeadScoreComponent = z.infer<typeof LeadScoreComponentSchema>;

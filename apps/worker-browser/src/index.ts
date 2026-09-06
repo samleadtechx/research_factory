@@ -11,9 +11,10 @@ import {
   type BrowserResearchPayload
 } from "@leadfactory/queue";
 import { calculateWorkerLimits, probeSystemCapacity } from "@leadfactory/resource-governor";
-import { CampaignPlanSchema, ServerSettingsSchema, type CampaignPlan } from "@leadfactory/schemas";
+import { defaultRuntimeSettings, readRuntimeSettings } from "@leadfactory/runtime-config";
+import { CampaignPlanSchema, RuntimeSettingsSchema, type CampaignPlan, type RuntimeSettings } from "@leadfactory/schemas";
 import { SourceRecipeConfigSchema, type SourceRecipeConfig, type SourceRecipeStep } from "@leadfactory/source-adapters";
-import { Job, Worker } from "bullmq";
+import { Job, Queue, Worker } from "bullmq";
 import "dotenv/config";
 import { chromium, type BrowserContextOptions, type Page } from "playwright";
 
@@ -76,11 +77,10 @@ class PageBlockedError extends Error {
 }
 
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
-const appStorageDir = resolveStorageDir(process.env.APP_STORAGE_DIR ?? "data");
-const redisUrl = requiredEnv("REDIS_URL");
-const documentStore = new LocalDocumentStore(appStorageDir);
-const browserFetchQueue = createQueue<BrowserResearchPayload>(queueNames.browserFetch, redisUrl);
-const analysisQueue = createQueue<AnalysisPayload>(queueNames.qwenAnalysis, redisUrl);
+let runtimeSettings: RuntimeSettings = defaultRuntimeSettings();
+let documentStore = new LocalDocumentStore(resolveStorageDir(runtimeSettings.appStorageDir));
+let browserFetchQueue: Queue<BrowserResearchPayload>;
+let analysisQueue: Queue<AnalysisPayload>;
 
 const profileUserAgents = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -109,17 +109,21 @@ const businessProfileDomains = [
 ];
 
 export async function main() {
+  runtimeSettings = await readRuntimeSettings();
+  documentStore = new LocalDocumentStore(resolveStorageDir(runtimeSettings.appStorageDir));
+  browserFetchQueue = createQueue<BrowserResearchPayload>(queueNames.browserFetch, runtimeSettings.redisUrl);
+  analysisQueue = createQueue<AnalysisPayload>(queueNames.qwenAnalysis, runtimeSettings.redisUrl);
   const limits = await resolveWorkerLimits();
   const discoveryWorker = new Worker<BrowserResearchPayload>(
     queueNames.discovery,
     processBrowserJob,
     {
-      connection: createRedisConnection(redisUrl),
+      connection: createRedisConnection(runtimeSettings.redisUrl),
       concurrency: limits.maxDiscoveryConcurrency
     }
   );
   const fetchWorker = new Worker<BrowserResearchPayload>(queueNames.browserFetch, processBrowserJob, {
-    connection: createRedisConnection(redisUrl),
+    connection: createRedisConnection(runtimeSettings.redisUrl),
     concurrency: limits.maxBrowsers
   });
 
@@ -160,6 +164,8 @@ export async function main() {
 }
 
 async function processBrowserJob(job: Job<BrowserResearchPayload>) {
+  runtimeSettings = await readRuntimeSettings();
+  documentStore = new LocalDocumentStore(resolveStorageDir(runtimeSettings.appStorageDir));
   const campaign = await activateCampaign(job.data.campaignId);
   if (!campaign) {
     await markResearchJob(job.data.researchJobId, "completed", {
@@ -203,7 +209,7 @@ async function discoverCandidates(job: Job<BrowserResearchPayload>) {
 
   const plan = parseCampaignPlan(campaign.plan, campaign.prompt, campaign.name);
   const query = job.data.query ?? buildDiscoveryQuery(plan);
-  const target = Math.min(campaign.targetLeadCount ?? 50, Number(process.env.MAX_DISCOVERY_RESULTS ?? 80));
+  const target = Math.min(campaign.targetLeadCount ?? 50, runtimeSettings.maxDiscoveryResults);
   const discoveryLimit = Math.max(target * 2, 25);
   const [recipeResults, webSearchResults] = await Promise.all([
     runActiveSourceRecipes({
@@ -292,8 +298,8 @@ async function researchCompany(job: Job<BrowserResearchPayload>) {
   }
 
   const campaign = lead.campaign;
-  const settings = ServerSettingsSchema.parse({
-    ...readSettingsFromEnv(),
+  const settings = RuntimeSettingsSchema.parse({
+    ...runtimeSettings,
     ...(campaign.settings && typeof campaign.settings === "object" ? campaign.settings : {})
   });
   const startUrl = normalizeInputUrl(job.data.url ?? lead.company.website ?? "");
@@ -449,7 +455,7 @@ async function fetchSearchResults(params: {
       url: searchUrl,
       sourceName: "duckduckgo",
       proxyStrategy: params.proxyStrategy,
-      maxAttempts: Number(process.env.SEARCH_RETRY_COUNT ?? 2)
+      maxAttempts: runtimeSettings.searchRetryCount
     },
     async (page) => {
       await navigateAndSnapshot(page, searchUrl);
@@ -489,7 +495,7 @@ async function runActiveSourceRecipes(params: {
   limit: number;
   proxyStrategy: BrowserResearchPayload["proxyStrategy"];
 }): Promise<SearchResult[]> {
-  const maxRecipes = Number(process.env.MAX_ACTIVE_SOURCE_RECIPES ?? 10);
+  const maxRecipes = runtimeSettings.maxActiveSourceRecipes;
   const recipes = await prisma.sourceRecipe.findMany({
     where: {
       OR: [
@@ -538,7 +544,7 @@ async function runSourceRecipe(
   }
 ): Promise<SearchResult[]> {
   const results: SearchResult[] = [];
-  const perRecipeLimit = Math.max(1, Math.min(params.limit, Number(process.env.SOURCE_RECIPE_RESULT_LIMIT ?? 60)));
+  const perRecipeLimit = Math.max(1, Math.min(params.limit, runtimeSettings.sourceRecipeResultLimit));
   const querySpecs = [
     ...config.discoveryQueries.map((value) => ({ value, limit: perRecipeLimit })),
     ...config.steps
@@ -546,7 +552,7 @@ async function runSourceRecipe(
       .map((step) => ({ value: step.value ?? "{query}", limit: step.limit ?? perRecipeLimit }))
   ];
 
-  for (const spec of querySpecs.slice(0, Number(process.env.SOURCE_RECIPE_MAX_QUERIES ?? 8))) {
+  for (const spec of querySpecs.slice(0, runtimeSettings.sourceRecipeMaxQueries)) {
     const query = renderRecipeTemplate(spec.value, params.plan, params.query);
     if (!query) continue;
     const found = await fetchSearchResults({
@@ -572,7 +578,7 @@ async function runSourceRecipe(
       .map((step) => ({ value: step.value!, limit: step.limit ?? perRecipeLimit }))
   ];
 
-  for (const spec of openSpecs.slice(0, Number(process.env.SOURCE_RECIPE_MAX_SEEDS ?? 10))) {
+  for (const spec of openSpecs.slice(0, runtimeSettings.sourceRecipeMaxSeeds)) {
     const url = normalizeInputUrl(renderRecipeTemplate(spec.value, params.plan, params.query));
     if (!url) continue;
     const pageResults = await runSourceRecipePage(recipe, config, {
@@ -603,7 +609,7 @@ async function runSourceRecipePage(
       url: params.url,
       sourceName: `source_recipe:${recipe.name}`,
       proxyStrategy: params.proxyStrategy,
-      maxAttempts: Number(process.env.SOURCE_RECIPE_RETRY_COUNT ?? 2)
+      maxAttempts: runtimeSettings.sourceRecipeRetryCount
     },
     async (page) => {
       const collected = new Map<string, SearchResult>();
@@ -640,7 +646,7 @@ async function runSourceRecipePage(
         }
 
         if (step.action === "paginate") {
-          const pages = Math.min(step.limit ?? 3, Number(process.env.SOURCE_RECIPE_MAX_PAGES ?? 8));
+          const pages = Math.min(step.limit ?? 3, runtimeSettings.sourceRecipeMaxPages);
           for (let pageIndex = 0; pageIndex < pages && collected.size < params.limit; pageIndex += 1) {
             const clicked = await clickRecipeSelector(page, step.selector ?? 'a[rel="next"]');
             if (!clicked) break;
@@ -686,7 +692,7 @@ async function withBrowserPage<T>(
 
     const startedAt = Date.now();
     const browser = await chromium.launch({
-      headless: process.env.BROWSER_HEADLESS !== "false",
+      headless: runtimeSettings.browserHeadless,
       proxy: proxy
         ? {
             server: `${proxy.protocol}://${proxy.host}:${proxy.port}`,
@@ -699,7 +705,7 @@ async function withBrowserPage<T>(
     try {
       const context = await browser.newContext(randomContextOptions());
       const page = await context.newPage();
-      page.setDefaultTimeout(Number(process.env.BROWSER_ACTION_TIMEOUT_MS ?? 15000));
+      page.setDefaultTimeout(runtimeSettings.browserActionTimeoutMs);
       const result = await callback(page, proxy);
       await context.close();
       await markProxySuccess(proxy, Date.now() - startedAt);
@@ -729,7 +735,7 @@ async function withBrowserPage<T>(
 async function navigateAndSnapshot(page: Page, url: string): Promise<PageSnapshot> {
   const response = await page.goto(url, {
     waitUntil: "domcontentloaded",
-    timeout: Number(process.env.BROWSER_NAVIGATION_TIMEOUT_MS ?? 45000)
+    timeout: runtimeSettings.browserNavigationTimeoutMs
   });
   await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => undefined);
 
@@ -766,7 +772,7 @@ async function captureCurrentSnapshot(page: Page, requestedUrl: string, statusCo
 }
 
 async function markSourceRecipeSuccess(recipe: SourceRecipeRecord) {
-  const autoActivateAfter = Number(process.env.SOURCE_RECIPE_AUTO_ACTIVATE_AFTER ?? 3);
+  const autoActivateAfter = runtimeSettings.sourceRecipeAutoActivateAfter;
   const shouldActivate =
     recipe.status === "trial" && autoActivateAfter > 0 && recipe.successCount + 1 >= autoActivateAfter;
 
@@ -780,7 +786,7 @@ async function markSourceRecipeSuccess(recipe: SourceRecipeRecord) {
 }
 
 async function markSourceRecipeFailure(recipe: SourceRecipeRecord, reason: string) {
-  const autoDisableAfter = Number(process.env.SOURCE_RECIPE_AUTO_DISABLE_AFTER ?? 10);
+  const autoDisableAfter = runtimeSettings.sourceRecipeAutoDisableAfter;
   const shouldDisable =
     recipe.status !== "disabled" &&
     recipe.successCount === 0 &&
@@ -1367,9 +1373,9 @@ function collectSavedSignals(
 }
 
 async function resolveWorkerLimits() {
-  const settings = readSettingsFromEnv();
+  runtimeSettings = await readRuntimeSettings();
   const [capacity, usableProxyCount] = await Promise.all([
-    probeSystemCapacity(),
+    probeSystemCapacity(runtimeSettings.appStorageDir),
     prisma.proxy.count({
       where: {
         status: { in: ["healthy", "untested", "degraded"] }
@@ -1378,22 +1384,10 @@ async function resolveWorkerLimits() {
   ]);
 
   return calculateWorkerLimits({
-    settings,
+    settings: runtimeSettings,
     capacity,
     healthyProxyCount: usableProxyCount,
     qwenHealthy: true
-  });
-}
-
-function readSettingsFromEnv() {
-  return ServerSettingsSchema.parse({
-    serverUsagePercent: Number(process.env.SERVER_USAGE_PERCENT ?? 60),
-    maxBrowsersHardCap: Number(process.env.MAX_BROWSERS_HARD_CAP ?? 40),
-    maxQwenConcurrency: Number(process.env.MAX_QWEN_CONCURRENCY ?? 4),
-    maxCampaignRuntimeMinutes: Number(process.env.MAX_CAMPAIGN_RUNTIME_MINUTES ?? 240),
-    maxPagesPerLead: Number(process.env.MAX_PAGES_PER_LEAD ?? 25),
-    proxyRetryCount: Number(process.env.PROXY_RETRY_COUNT ?? 2),
-    browserFirst: process.env.BROWSER_FIRST !== "false"
   });
 }
 
@@ -1704,12 +1698,6 @@ function hashText(value: string): string {
 
 function resolveStorageDir(value: string): string {
   return path.isAbsolute(value) ? value : path.join(rootDir, value);
-}
-
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required env var ${name}`);
-  return value;
 }
 
 function waitForShutdown(cleanup: () => Promise<void>): Promise<void> {

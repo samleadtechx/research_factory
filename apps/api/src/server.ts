@@ -20,11 +20,12 @@ import {
   probeServerHealth,
   probeSystemCapacity
 } from "@leadfactory/resource-governor";
+import { defaultRuntimeSettings, readRuntimeSettings, updateRuntimeSettings } from "@leadfactory/runtime-config";
 import {
   CreateCampaignInputSchema,
   CampaignPlanSchema,
   ProxyUploadSchema,
-  ServerSettingsSchema,
+  RuntimeSettingsUpdateSchema,
   type CampaignPlan
 } from "@leadfactory/schemas";
 import {
@@ -49,7 +50,8 @@ const api = Fastify({
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
 const debugBrowsers = createDebugBrowserController({
   rootDir,
-  storageDir: process.env.APP_STORAGE_DIR ?? `${rootDir}/data`
+  storageDir: defaultRuntimeSettings().appStorageDir,
+  getSettings: readRuntimeSettings
 });
 
 await api.register(cors, {
@@ -82,11 +84,26 @@ api.get("/health", async () => ({
   time: new Date().toISOString()
 }));
 
-api.get("/settings/defaults", async () => readSettingsFromEnv());
+api.get("/settings/defaults", async () => defaultRuntimeSettings());
+
+api.get("/settings/runtime", async () => {
+  return {
+    settings: await readRuntimeSettings(),
+    defaults: defaultRuntimeSettings()
+  };
+});
+
+api.post("/settings/runtime", async (request) => {
+  const input = RuntimeSettingsUpdateSchema.parse(request.body ?? {});
+  return {
+    settings: await updateRuntimeSettings(input),
+    defaults: defaultRuntimeSettings()
+  };
+});
 
 api.get("/system/capacity", async () => {
-  const settings = readSettingsFromEnv();
-  const capacity = await probeSystemCapacity();
+  const settings = await readRuntimeSettings();
+  const capacity = await probeSystemCapacity(settings.appStorageDir);
   const healthyProxyCount = await prisma.proxy.count({
     where: {
       status: { in: ["healthy", "untested", "degraded"] }
@@ -103,11 +120,12 @@ api.get("/system/capacity", async () => {
 });
 
 api.get("/system/health", async () => {
+  const settings = await readRuntimeSettings();
   return probeServerHealth({
-    appStorageDir: process.env.APP_STORAGE_DIR ?? `${rootDir}/data`,
-    databaseUrl: process.env.DATABASE_URL ?? "postgresql://leadfactory:leadfactory@localhost:5432/leadfactory",
-    redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
-    localLlmBaseUrl: process.env.LOCAL_LLM_BASE_URL ?? "http://73.72.215.253:11434/v1",
+    appStorageDir: settings.appStorageDir,
+    databaseUrl: requiredEnv("DATABASE_URL"),
+    redisUrl: settings.redisUrl,
+    localLlmBaseUrl: settings.localLlmBaseUrl,
     rootDir
   });
 });
@@ -505,14 +523,15 @@ api.get("/campaigns/:campaignId", async (request, reply) => {
 
 api.post("/campaigns", async (request) => {
   const input = CreateCampaignInputSchema.parse(request.body);
+  const runtimeSettings = await readRuntimeSettings();
   const llm = new OpenAICompatibleLLMProvider({
-    baseUrl: requiredEnv("LOCAL_LLM_BASE_URL"),
-    model: requiredEnv("LOCAL_LLM_MODEL"),
-    apiKey: process.env.LOCAL_LLM_API_KEY ?? "local"
+    baseUrl: runtimeSettings.localLlmBaseUrl,
+    model: runtimeSettings.localLlmModel,
+    apiKey: runtimeSettings.localLlmApiKey
   });
   const plan = await planCampaign({ prompt: input.prompt, llm });
   const settings = {
-    ...readSettingsFromEnv(),
+    ...runtimeSettings,
     ...(input.serverUsagePercent ? { serverUsagePercent: input.serverUsagePercent } : {})
   };
 
@@ -797,18 +816,6 @@ api.get("/proxies", async () => {
 const port = Number(process.env.API_PORT ?? 4000);
 await api.listen({ port, host: "0.0.0.0" });
 
-function readSettingsFromEnv() {
-  return ServerSettingsSchema.parse({
-    serverUsagePercent: Number(process.env.SERVER_USAGE_PERCENT ?? 60),
-    maxBrowsersHardCap: Number(process.env.MAX_BROWSERS_HARD_CAP ?? 40),
-    maxQwenConcurrency: Number(process.env.MAX_QWEN_CONCURRENCY ?? 4),
-    maxCampaignRuntimeMinutes: Number(process.env.MAX_CAMPAIGN_RUNTIME_MINUTES ?? 240),
-    maxPagesPerLead: Number(process.env.MAX_PAGES_PER_LEAD ?? 25),
-    proxyRetryCount: Number(process.env.PROXY_RETRY_COUNT ?? 2),
-    browserFirst: process.env.BROWSER_FIRST !== "false"
-  });
-}
-
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing required env var ${name}`);
@@ -1039,7 +1046,8 @@ function summarizeCampaigns(campaigns: Array<{ status: string; progress: ReturnT
 }
 
 async function enqueueDiscovery(campaignId: string, plan: CampaignPlan, researchJobId?: string) {
-  const queue = createQueue<BrowserResearchPayload>(queueNames.discovery, requiredEnv("REDIS_URL"));
+  const settings = await readRuntimeSettings();
+  const queue = createQueue<BrowserResearchPayload>(queueNames.discovery, settings.redisUrl);
   try {
     await queue.add(
       "discover_candidates",

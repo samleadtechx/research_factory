@@ -16,6 +16,7 @@
     "@leadfactory/llm": "workspace:*",
     "@leadfactory/queue": "workspace:*",
     "@leadfactory/resource-governor": "workspace:*",
+    "@leadfactory/runtime-config": "workspace:*",
     "@leadfactory/schemas": "workspace:*",
     "@leadfactory/scoring": "workspace:*",
     "@leadfactory/source-adapters": "workspace:*",
