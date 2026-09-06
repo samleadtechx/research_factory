@@ -74,6 +74,7 @@ export const ServerSettingsSchema = z.object({
 });
 
 export const DebugBrowserHeadlessSchema = z.union([z.boolean(), z.literal("virtual")]);
+export const BrowserEngineSchema = z.enum(["camoufox", "playwright"]);
 
 export const RuntimeSettingsSchema = ServerSettingsSchema.extend({
   redisUrl: z.string().trim().min(1).default("redis://localhost:6379"),
@@ -84,6 +85,7 @@ export const RuntimeSettingsSchema = ServerSettingsSchema.extend({
   appStorageDir: z.string().trim().min(1).default("./data"),
   maxDiscoveryResults: z.number().int().min(1).max(100000).default(80),
   searchRetryCount: z.number().int().min(0).max(10).default(2),
+  browserEngine: BrowserEngineSchema.default("camoufox"),
   browserHeadless: z.boolean().default(true),
   browserActionTimeoutMs: z.number().int().min(500).max(120000).default(15000),
   browserNavigationTimeoutMs: z.number().int().min(1000).max(180000).default(45000),
@@ -128,6 +130,7 @@ export const RuntimeSettingsUpdateSchema = z.object({
   browserFirst: z.boolean().optional(),
   maxDiscoveryResults: z.number().int().min(1).max(100000).optional(),
   searchRetryCount: z.number().int().min(0).max(10).optional(),
+  browserEngine: BrowserEngineSchema.optional(),
   browserHeadless: z.boolean().optional(),
   browserActionTimeoutMs: z.number().int().min(500).max(120000).optional(),
   browserNavigationTimeoutMs: z.number().int().min(1000).max(180000).optional(),

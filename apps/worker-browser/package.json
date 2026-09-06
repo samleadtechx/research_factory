@@ -20,7 +20,7 @@
     "@leadfactory/source-adapters": "workspace:*",
     "bullmq": "^5.66.0",
     "dotenv": "^17.4.2",
-    "playwright": "^1.62.1"
+    "playwright": "1.60.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

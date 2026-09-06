@@ -10,6 +10,7 @@ describe("runtime settings schema", () => {
     expect(settings.localLlmModel).toBe("qwen2.5:14b");
     expect(settings.mcpBearerToken).toBe("");
     expect(settings.appStorageDir).toBe("./data");
+    expect(settings.browserEngine).toBe("camoufox");
     expect(settings.debugBrowserHeadless).toBe("virtual");
   });
 
@@ -18,6 +19,7 @@ describe("runtime settings schema", () => {
       redisUrl: "redis://redis:6379",
       mcpBearerToken: "secret-token",
       serverUsagePercent: 70,
+      browserEngine: "playwright",
       browserFirst: false,
       debugBrowserHeadless: true
     });
@@ -26,6 +28,7 @@ describe("runtime settings schema", () => {
       redisUrl: "redis://redis:6379",
       mcpBearerToken: "secret-token",
       serverUsagePercent: 70,
+      browserEngine: "playwright",
       browserFirst: false,
       debugBrowserHeadless: true
     });

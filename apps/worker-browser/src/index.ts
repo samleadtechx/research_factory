@@ -16,16 +16,16 @@ import { CampaignPlanSchema, RuntimeSettingsSchema, type CampaignPlan, type Runt
 import { SourceRecipeConfigSchema, type SourceRecipeConfig, type SourceRecipeStep } from "@leadfactory/source-adapters";
 import { Job, Queue, Worker } from "bullmq";
 import "dotenv/config";
-import { chromium, type BrowserContextOptions, type Page } from "playwright";
+import { type Page } from "playwright";
+import {
+  closeWorkerBrowserSession,
+  detectBlockReason,
+  launchWorkerBrowserSession,
+  type WorkerBrowserSession,
+  type WorkerProxyRecord
+} from "./browserRuntime.js";
 
-type ProxyRecord = {
-  id: string;
-  protocol: "http" | "https" | "socks5";
-  host: string;
-  port: number;
-  username: string;
-  passwordEncrypted: string | null;
-};
+type ProxyRecord = WorkerProxyRecord;
 
 type SearchResult = {
   url: string;
@@ -70,6 +70,8 @@ type SavedPage = {
   people: Array<{ name: string; role: string }>;
 };
 
+type BrowserRetrievalMethod = "browser" | "camoufox";
+
 class PageBlockedError extends Error {
   constructor(readonly reason: string) {
     super(reason);
@@ -81,12 +83,6 @@ let runtimeSettings: RuntimeSettings = defaultRuntimeSettings();
 let documentStore = new LocalDocumentStore(resolveStorageDir(runtimeSettings.appStorageDir));
 let browserFetchQueue: Queue<BrowserResearchPayload>;
 let analysisQueue: Queue<AnalysisPayload>;
-
-const profileUserAgents = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-];
 
 const searchEngineDomains = new Set([
   "duckduckgo.com",
@@ -316,7 +312,7 @@ async function researchCompany(job: Job<BrowserResearchPayload>) {
       proxyId: job.data.proxyId,
       maxAttempts: Math.max(1, settings.proxyRetryCount + 1)
     },
-    async (page, proxy) => {
+    async (page, proxy, browserEngine) => {
       const documentIds: string[] = [];
       const allEmails = new Set<string>();
       const allPhones = new Set<string>();
@@ -328,6 +324,7 @@ async function researchCompany(job: Job<BrowserResearchPayload>) {
         leadId: lead.id,
         snapshot: rootSnapshot,
         sourceType: inferSourceType(rootSnapshot.finalUrl),
+        retrievalMethod: retrievalMethodForEngine(browserEngine),
         proxyId: proxy?.id
       });
       collectSavedSignals(savedRoot, allEmails, allPhones, allPeople);
@@ -347,6 +344,7 @@ async function researchCompany(job: Job<BrowserResearchPayload>) {
             leadId: lead.id,
             snapshot,
             sourceType: inferSourceType(snapshot.finalUrl),
+            retrievalMethod: retrievalMethodForEngine(browserEngine),
             proxyId: proxy?.id
           });
           collectSavedSignals(saved, allEmails, allPhones, allPeople);
@@ -680,7 +678,7 @@ async function withBrowserPage<T>(
     proxyId?: string;
     maxAttempts: number;
   },
-  callback: (page: Page, proxy: ProxyRecord | null) => Promise<T>
+  callback: (page: Page, proxy: ProxyRecord | null, browserEngine: RuntimeSettings["browserEngine"]) => Promise<T>
 ): Promise<{ ok: true; result: T } | { ok: false; blocked: boolean; reason: string }> {
   const excludedProxyIds = new Set<string>();
   let lastFailure: { blocked: boolean; reason: string } | null = null;
@@ -691,23 +689,15 @@ async function withBrowserPage<T>(
     if (proxy) excludedProxyIds.add(proxy.id);
 
     const startedAt = Date.now();
-    const browser = await chromium.launch({
-      headless: runtimeSettings.browserHeadless,
-      proxy: proxy
-        ? {
-            server: `${proxy.protocol}://${proxy.host}:${proxy.port}`,
-            username: proxy.username || undefined,
-            password: proxy.passwordEncrypted ?? undefined
-          }
-        : undefined
-    });
+    let browserSession: WorkerBrowserSession | null = null;
 
     try {
-      const context = await browser.newContext(randomContextOptions());
-      const page = await context.newPage();
-      page.setDefaultTimeout(runtimeSettings.browserActionTimeoutMs);
-      const result = await callback(page, proxy);
-      await context.close();
+      browserSession = await launchWorkerBrowserSession({
+        rootDir,
+        settings: runtimeSettings,
+        proxy
+      });
+      const result = await callback(browserSession.page, proxy, browserSession.engine);
       await markProxySuccess(proxy, Date.now() - startedAt);
       return { ok: true, result };
     } catch (error) {
@@ -725,7 +715,7 @@ async function withBrowserPage<T>(
         error
       });
     } finally {
-      await browser.close().catch(() => undefined);
+      if (browserSession) await closeWorkerBrowserSession(browserSession).catch(() => undefined);
     }
   }
 
@@ -751,7 +741,12 @@ async function captureCurrentSnapshot(page: Page, requestedUrl: string, statusCo
       .catch(() => stripHtml(html))
   );
   const title = normalizeWhitespace(await page.title().catch(() => ""));
-  const blockReason = detectBlockReason(text, html, statusCode);
+  const blockReason = detectBlockReason({
+    text,
+    html,
+    statusCode,
+    finalUrl: page.url()
+  });
   if (blockReason) throw new PageBlockedError(blockReason);
 
   const links = await page.evaluate(() =>
@@ -962,6 +957,7 @@ async function saveSnapshot(params: {
   leadId: string;
   snapshot: PageSnapshot;
   sourceType: string;
+  retrievalMethod: BrowserRetrievalMethod;
   proxyId?: string;
 }): Promise<SavedPage> {
   const raw = await documentStore.save({
@@ -986,7 +982,7 @@ async function saveSnapshot(params: {
       campaignId: params.campaignId,
       companyId: params.companyId,
       sourceType: params.sourceType,
-      retrievalMethod: "browser",
+      retrievalMethod: params.retrievalMethod,
       url: params.snapshot.requestedUrl,
       canonicalUrl: canonicalizeUrl(params.snapshot.finalUrl),
       finalUrl: params.snapshot.finalUrl,
@@ -1016,6 +1012,7 @@ async function saveSnapshot(params: {
       documentId: document.id,
       field: "public_email",
       sourceType: params.sourceType,
+      retrievalMethod: params.retrievalMethod,
       url: params.snapshot.requestedUrl,
       finalUrl: params.snapshot.finalUrl,
       quote: findQuote(params.snapshot.text, email)
@@ -1030,6 +1027,7 @@ async function saveSnapshot(params: {
       documentId: document.id,
       field: "public_phone",
       sourceType: params.sourceType,
+      retrievalMethod: params.retrievalMethod,
       url: params.snapshot.requestedUrl,
       finalUrl: params.snapshot.finalUrl,
       quote: findQuote(params.snapshot.text, phone)
@@ -1044,6 +1042,7 @@ async function saveSnapshot(params: {
       documentId: document.id,
       field: "owner_manager_name",
       sourceType: params.sourceType,
+      retrievalMethod: params.retrievalMethod,
       url: params.snapshot.requestedUrl,
       finalUrl: params.snapshot.finalUrl,
       quote: findQuote(params.snapshot.text, person.name) || `${person.name} - ${person.role}`
@@ -1148,6 +1147,7 @@ async function createEvidence(params: {
   documentId?: string;
   field: string;
   sourceType: string;
+  retrievalMethod?: BrowserRetrievalMethod;
   url: string;
   finalUrl?: string;
   quote: string;
@@ -1174,7 +1174,7 @@ async function createEvidence(params: {
       documentId: params.documentId,
       field: params.field,
       sourceType: params.sourceType,
-      retrievalMethod: "browser",
+      retrievalMethod: params.retrievalMethod ?? "browser",
       url: params.url,
       finalUrl: params.finalUrl,
       quote,
@@ -1478,29 +1478,6 @@ function isBusinessProfileDomain(domain: string): boolean {
   return businessProfileDomains.some((known) => domain === known || domain.endsWith(`.${known}`));
 }
 
-function detectBlockReason(text: string, html: string, statusCode?: number): string | null {
-  if (statusCode && [401, 403, 407, 429, 503].includes(statusCode)) {
-    return `HTTP ${statusCode} block or throttling response`;
-  }
-
-  const sample = `${text}\n${html.slice(0, 3000)}`.toLowerCase();
-  const patterns = [
-    "access denied",
-    "are you a human",
-    "captcha",
-    "checking if the site connection is secure",
-    "enable cookies",
-    "login required",
-    "please verify",
-    "temporarily blocked",
-    "too many requests",
-    "unusual traffic",
-    "verify you are human"
-  ];
-
-  return patterns.find((pattern) => sample.includes(pattern)) ?? null;
-}
-
 function extractEmails(text: string): string[] {
   const matches = text.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi) ?? [];
   return [...new Set(matches.map((email) => email.toLowerCase()))].filter((email) => {
@@ -1665,20 +1642,8 @@ function isOwnerLike(person: { role: string }) {
   return /owner|founder|ceo|president|principal/i.test(person.role);
 }
 
-function randomContextOptions(): BrowserContextOptions {
-  return {
-    acceptDownloads: false,
-    colorScheme: "light",
-    hasTouch: false,
-    javaScriptEnabled: true,
-    locale: "en-US",
-    timezoneId: "America/Chicago",
-    userAgent: profileUserAgents[Math.floor(Math.random() * profileUserAgents.length)],
-    viewport: {
-      width: 1280 + Math.floor(Math.random() * 320),
-      height: 760 + Math.floor(Math.random() * 220)
-    }
-  };
+function retrievalMethodForEngine(engine: RuntimeSettings["browserEngine"]): BrowserRetrievalMethod {
+  return engine === "camoufox" ? "camoufox" : "browser";
 }
 
 function stripHtml(html: string): string {

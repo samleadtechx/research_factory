@@ -26,6 +26,7 @@ export function defaultRuntimeSettings(): RuntimeSettings {
     browserFirst: booleanFromEnv("BROWSER_FIRST", true),
     maxDiscoveryResults: numberFromEnv("MAX_DISCOVERY_RESULTS", 80),
     searchRetryCount: numberFromEnv("SEARCH_RETRY_COUNT", 2),
+    browserEngine: browserEngineFromEnv(),
     browserHeadless: booleanFromEnv("BROWSER_HEADLESS", true),
     browserActionTimeoutMs: numberFromEnv("BROWSER_ACTION_TIMEOUT_MS", 15000),
     browserNavigationTimeoutMs: numberFromEnv("BROWSER_NAVIGATION_TIMEOUT_MS", 45000),
@@ -103,6 +104,12 @@ function debugHeadlessFromEnv(): RuntimeSettings["debugBrowserHeadless"] {
   if (configured === "true" || configured === "1") return true;
   if (configured === "virtual") return "virtual";
   return process.platform === "linux" && !process.env.DISPLAY ? "virtual" : false;
+}
+
+function browserEngineFromEnv(): RuntimeSettings["browserEngine"] {
+  const configured = process.env.BROWSER_ENGINE?.toLowerCase();
+  if (configured === "playwright") return "playwright";
+  return "camoufox";
 }
 
 function isMissingSettingsTableError(error: unknown): boolean {

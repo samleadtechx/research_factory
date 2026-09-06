@@ -447,6 +447,9 @@ class DebugBrowserController {
     const launchOptions: Record<string, unknown> = {
       headless,
       humanize: input.humanize,
+      fingerprint_preset: true,
+      block_webrtc: true,
+      enable_cache: false,
       config: { showcursor: false },
       env: {
         ...process.env,

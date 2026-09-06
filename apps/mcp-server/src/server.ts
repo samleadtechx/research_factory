@@ -8,7 +8,7 @@ export type LeadResearchMcpServerOptions = {
 
 const defaultApiBaseUrl = "http://localhost:4000";
 const leadResearchMcpInstructions =
-  "Use Lead Research Factory as the control plane for lead generation. Check runtime settings, system health, and capacity before campaigns. Create campaigns from the user's ICP prompt, use strict public evidence, reuse active source/enrichment/email-verification providers, and use Camoufox debug browser tools only when a source needs custom handling. Do not guess owners, emails, or fit; mark unknown or blocked when evidence is weak.";
+  "Use Lead Research Factory as the control plane for lead generation. Check runtime settings, system health, and capacity before campaigns. Create campaigns from the user's ICP prompt, use strict public evidence, reuse active source/enrichment/email-verification providers, and use Camoufox debug browser tools only when a source needs custom handling. Do not guess owners, emails, or fit; mark unknown or blocked when evidence is weak. If Google /sorry, CAPTCHA, or other challenge pages appear, record the source as blocked and rotate/skip instead of trying to solve the challenge.";
 
 const sourceRecipeStepInputSchema = z.object({
   action: z.enum([
@@ -83,6 +83,7 @@ const runtimeSettingsInputSchema = z
     browserFirst: z.boolean(),
     maxDiscoveryResults: z.number().int().min(1).max(100000),
     searchRetryCount: z.number().int().min(0).max(10),
+    browserEngine: z.enum(["camoufox", "playwright"]),
     browserHeadless: z.boolean(),
     browserActionTimeoutMs: z.number().int().min(500).max(120000),
     browserNavigationTimeoutMs: z.number().int().min(1000).max(180000),

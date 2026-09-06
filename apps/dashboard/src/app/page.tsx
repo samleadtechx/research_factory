@@ -144,6 +144,7 @@ type ProxyListResponse = {
 };
 
 type DebugBrowserHeadless = boolean | "virtual";
+type BrowserEngine = "camoufox" | "playwright";
 
 type RuntimeSettings = {
   redisUrl: string;
@@ -161,6 +162,7 @@ type RuntimeSettings = {
   browserFirst: boolean;
   maxDiscoveryResults: number;
   searchRetryCount: number;
+  browserEngine: BrowserEngine;
   browserHeadless: boolean;
   browserActionTimeoutMs: number;
   browserNavigationTimeoutMs: number;
@@ -409,14 +411,15 @@ Normal workflow:
 2. Update Redis, Qwen, storage, browser, capacity, and provider runtime settings with update_runtime_settings when the user asks.
 3. Create campaigns from the user's ICP prompt with create_campaign.
 4. Use strict evidence. Unknown is better than guessed.
-5. Inspect reusable providers with list_source_recipes, list_enrichment_providers, and list_email_verification_providers before creating new ones.
-6. When a source needs custom browser handling, start Camoufox with start_debug_browser and inspect it with debug_browser_snapshot/open/click/type/extract/screenshot.
-7. Convert the debug trail into a source recipe draft with debug_browser_recipe_draft, then save it with create_source_recipe.
-8. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Store reusable provider credentials in provider templates or server secrets.
-9. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
-10. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
-11. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
-12. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
+5. If Google /sorry, CAPTCHA, or other challenge pages appear, record the source as blocked and rotate/skip instead of trying to solve the challenge.
+6. Inspect reusable providers with list_source_recipes, list_enrichment_providers, and list_email_verification_providers before creating new ones.
+7. When a source needs custom browser handling, start Camoufox with start_debug_browser and inspect it with debug_browser_snapshot/open/click/type/extract/screenshot.
+8. Convert the debug trail into a source recipe draft with debug_browser_recipe_draft, then save it with create_source_recipe.
+9. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Store reusable provider credentials in provider templates or server secrets.
+10. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
+11. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
+12. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
+13. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
 
 Currently wired MCP tools:
 - get_runtime_settings
@@ -1288,6 +1291,11 @@ export default function DashboardPage() {
               <div className="runtimeGroup">
                 <h3>Browser</h3>
                 <div className="runtimeGrid">
+                  <RuntimeBrowserEngineSelect
+                    label="Worker Engine"
+                    value={runtimeSettings.browserEngine}
+                    onChange={(value) => updateRuntimeSetting("browserEngine", value)}
+                  />
                   <RuntimeToggle
                     label="Browser First"
                     checked={runtimeSettings.browserFirst}
@@ -1825,6 +1833,26 @@ function RuntimeToggle({
     <label className="runtimeToggle">
       <span>{label}</span>
       <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+    </label>
+  );
+}
+
+function RuntimeBrowserEngineSelect({
+  label,
+  value,
+  onChange
+}: {
+  label: string;
+  value: BrowserEngine;
+  onChange: (value: BrowserEngine) => void;
+}) {
+  return (
+    <label className="runtimeField">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value as BrowserEngine)}>
+        <option value="camoufox">camoufox</option>
+        <option value="playwright">playwright</option>
+      </select>
     </label>
   );
 }
