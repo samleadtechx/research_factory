@@ -1,0 +1,17 @@
+node_modules
+dist
+.next
+.turbo
+.env
+.env.local
+.leadfactory
+.venv
+*.log
+*.tsbuildinfo
+coverage
+data/documents/*
+data/screenshots/*
+data/exports/*
+!data/documents/.gitkeep
+!data/screenshots/.gitkeep
+!data/exports/.gitkeep

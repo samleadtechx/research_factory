@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "sourceMap": true,
+    "paths": {
+      "@leadfactory/campaign-planner": ["packages/campaign-planner/src/index.ts"],
+      "@leadfactory/database": ["packages/database/src/index.ts"],
+      "@leadfactory/document-store": ["packages/document-store/src/index.ts"],
+      "@leadfactory/llm": ["packages/llm/src/index.ts"],
+      "@leadfactory/proxy-manager": ["packages/proxy-manager/src/index.ts"],
+      "@leadfactory/queue": ["packages/queue/src/index.ts"],
+      "@leadfactory/resource-governor": ["packages/resource-governor/src/index.ts"],
+      "@leadfactory/schemas": ["packages/schemas/src/index.ts"],
+      "@leadfactory/scoring": ["packages/scoring/src/index.ts"],
+      "@leadfactory/source-adapters": ["packages/source-adapters/src/index.ts"]
+    }
+  }
+}

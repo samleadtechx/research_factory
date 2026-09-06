@@ -1,0 +1,2 @@
+camoufox[geoip]==0.5.5
+scrapy==2.18.0

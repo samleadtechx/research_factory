@@ -1,0 +1,35 @@
+{
+  "name": "ai-lead-research-factory",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "dev:api": "pnpm --filter @leadfactory/api dev",
+    "dev:dashboard": "pnpm --filter @leadfactory/dashboard dev",
+    "dev:mcp": "pnpm --filter @leadfactory/mcp-server dev",
+    "install:app": "bash scripts/install.sh",
+    "start:app": "bash scripts/start.sh",
+    "stop:app": "bash scripts/stop.sh",
+    "restart:app": "bash scripts/restart.sh",
+    "status:app": "bash scripts/status.sh",
+    "infra:up": "docker-compose up -d postgres redis",
+    "infra:down": "docker-compose down",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "db:generate": "pnpm --filter @leadfactory/database prisma:generate",
+    "db:migrate": "pnpm --filter @leadfactory/database prisma:migrate",
+    "db:migrate:deploy": "pnpm --filter @leadfactory/database prisma:migrate:deploy",
+    "db:push": "pnpm --filter @leadfactory/database prisma:push"
+  },
+  "devDependencies": {
+    "@leadfactory/proxy-manager": "workspace:*",
+    "@leadfactory/scoring": "workspace:*",
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.14"
+  }
+}

@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.git
+.leadfactory
+.next
+.turbo
+.venv
+coverage
+data/documents/*
+data/screenshots/*
+data/exports/*
+dist
+node_modules
+*.log
+*.tsbuildinfo

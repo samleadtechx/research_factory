@@ -1,0 +1,28 @@
+{
+  "name": "@leadfactory/worker-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit --rootDir ../.."
+  },
+  "dependencies": {
+    "@leadfactory/database": "workspace:*",
+    "@leadfactory/document-store": "workspace:*",
+    "@leadfactory/queue": "workspace:*",
+    "@leadfactory/resource-governor": "workspace:*",
+    "@leadfactory/schemas": "workspace:*",
+    "@leadfactory/source-adapters": "workspace:*",
+    "bullmq": "^5.66.0",
+    "dotenv": "^17.4.2",
+    "playwright": "^1.62.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}

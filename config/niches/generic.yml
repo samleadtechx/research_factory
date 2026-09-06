@@ -1,0 +1,8 @@
+name: generic
+description: Prompt-driven campaign with generated ICP, source strategy, evidence fields, and scoring rubric.
+browser_first: true
+strict_evidence: true
+contact_requirements:
+  - company website emails
+  - public business profile emails
+  - public owner or manager names

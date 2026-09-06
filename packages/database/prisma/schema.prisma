@@ -1,0 +1,302 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum CampaignStatus {
+  draft
+  planning
+  queued
+  running
+  paused
+  completed
+  failed
+  cancelled
+}
+
+enum JobStatus {
+  queued
+  running
+  paused
+  completed
+  failed
+  cancelled
+}
+
+enum ProxyProtocol {
+  http
+  https
+  socks5
+}
+
+enum ProxyStatus {
+  untested
+  healthy
+  degraded
+  cooldown
+  quarantined
+}
+
+enum RetrievalMethod {
+  browser
+  camoufox
+  http
+  api
+  manual
+}
+
+model Campaign {
+  id                  String         @id @default(uuid())
+  name                String
+  prompt              String
+  promptVersion       String         @default("v1")
+  status              CampaignStatus @default(planning)
+  plan                Json?
+  settings            Json?
+  targetLeadCount     Int?
+  serverUsagePercent  Int?
+  progress            Json?
+  error               Json?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  startedAt           DateTime?
+  completedAt         DateTime?
+
+  jobs                ResearchJob[]
+  leads               Lead[]
+  documents           Document[]
+  evidence            Evidence[]
+  claims              Claim[]
+  sourceFailures      SourceFailure[]
+  events              CampaignEvent[]
+  sourceRecipes       SourceRecipe[]
+}
+
+model ResearchJob {
+  id          String     @id @default(uuid())
+  campaignId  String
+  type        String
+  status      JobStatus  @default(queued)
+  priority    Int        @default(0)
+  parameters  Json
+  statistics  Json?
+  error       Json?
+  createdAt   DateTime   @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  campaign    Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status])
+  @@index([type, status, priority])
+}
+
+model Company {
+  id             String     @id @default(uuid())
+  companyName    String
+  normalizedName String?
+  domain         String?
+  website        String?
+  city           String?
+  state          String?
+  country        String?
+  phone          String?
+  generalEmail   String?
+  emails         Json?
+  owners         Json?
+  managers       Json?
+  metadata       Json?
+  firstSeenAt    DateTime   @default(now())
+  lastCheckedAt  DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  leads          Lead[]
+  documents      Document[]
+  evidence       Evidence[]
+  claims         Claim[]
+
+  @@index([domain])
+  @@index([phone])
+  @@index([normalizedName, city, state])
+}
+
+model Lead {
+  id                     String    @id @default(uuid())
+  campaignId             String
+  companyId              String?
+  status                 String    @default("candidate")
+  score                  Int       @default(0)
+  confidence             Float     @default(0)
+  strongestSignal        String?
+  scoreComponents        Json?
+  disqualified           Boolean   @default(false)
+  disqualificationReason String?
+  rank                   Int?
+  exportSnapshot         Json?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  campaign               Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company                Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  evidence               Evidence[]
+  claims                 Claim[]
+
+  @@index([campaignId, score])
+  @@index([campaignId, rank])
+  @@index([companyId])
+}
+
+model Document {
+  id              String          @id @default(uuid())
+  campaignId      String
+  companyId       String?
+  sourceType      String
+  retrievalMethod RetrievalMethod
+  url             String
+  canonicalUrl    String?
+  finalUrl        String?
+  httpStatus      Int?
+  retrievedAt     DateTime        @default(now())
+  contentHash     String?
+  rawHtmlPath     String?
+  cleanTextPath   String?
+  screenshotPath  String?
+  title           String?
+  metadata        Json?
+
+  campaign        Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company         Company?        @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  evidence        Evidence[]
+
+  @@index([campaignId, retrievedAt])
+  @@index([companyId])
+  @@index([contentHash])
+  @@index([url])
+}
+
+model Evidence {
+  id              String          @id @default(uuid())
+  campaignId      String
+  companyId       String?
+  leadId          String?
+  documentId      String?
+  field           String?
+  sourceType      String
+  retrievalMethod RetrievalMethod
+  url             String
+  finalUrl        String?
+  quote           String
+  retrievedAt     DateTime        @default(now())
+  contentHash     String?
+  metadata        Json?
+
+  campaign        Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company         Company?        @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  lead            Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  document        Document?       @relation(fields: [documentId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, field])
+  @@index([companyId])
+  @@index([leadId])
+  @@index([documentId])
+}
+
+model Claim {
+  id              String    @id @default(uuid())
+  campaignId      String
+  companyId       String?
+  leadId          String?
+  field           String
+  value           Json
+  confidence      Float
+  evidenceIds     String[]
+  promptName      String
+  promptVersion   String
+  model           String
+  analysisVersion String
+  createdAt       DateTime  @default(now())
+
+  campaign        Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  company         Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  lead            Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, field])
+  @@index([companyId, field])
+  @@index([leadId, field])
+}
+
+model Proxy {
+  id                String        @id @default(uuid())
+  protocol          ProxyProtocol
+  host              String
+  port              Int
+  username          String        @default("")
+  passwordEncrypted String?
+  label             String?
+  status            ProxyStatus   @default(untested)
+  successes         Int           @default(0)
+  failures          Int           @default(0)
+  averageLatencyMs  Int?
+  lastUsedAt        DateTime?
+  cooldownUntil     DateTime?
+  healthScore       Float         @default(0)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@unique([protocol, host, port, username])
+  @@index([status, healthScore])
+}
+
+model SourceFailure {
+  id          String   @id @default(uuid())
+  campaignId  String
+  companyId   String?
+  leadId      String?
+  url         String
+  sourceName  String?
+  reason      String
+  details     Json?
+  blocked     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, blocked])
+  @@index([url])
+}
+
+model SourceRecipe {
+  id                      String   @id @default(uuid())
+  campaignId              String?
+  name                    String
+  version                 String
+  status                  String   @default("trial")
+  recipe                  Json
+  supportedDomains        String[]
+  successCount            Int      @default(0)
+  failureCount            Int      @default(0)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  campaign                Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@unique([name, version])
+  @@index([status])
+}
+
+model CampaignEvent {
+  id          String   @id @default(uuid())
+  campaignId  String
+  type        String
+  message     String
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, createdAt])
+}

@@ -1,0 +1,130 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: leadfactory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-leadfactory}
+      POSTGRES_DB: leadfactory
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadfactory -d leadfactory"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ROLE: api
+      RUN_MIGRATIONS: auto
+      API_PORT: 4000
+      DATABASE_URL: postgresql://leadfactory:${POSTGRES_PASSWORD:-leadfactory}@postgres:5432/leadfactory
+      REDIS_URL: redis://redis:6379
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://73.72.215.253:11434/v1}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen2.5:14b}
+      LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-local}
+      APP_STORAGE_DIR: /app/data
+      SERVER_USAGE_PERCENT: ${SERVER_USAGE_PERCENT:-60}
+      MAX_BROWSERS_HARD_CAP: ${MAX_BROWSERS_HARD_CAP:-40}
+      MAX_QWEN_CONCURRENCY: ${MAX_QWEN_CONCURRENCY:-4}
+      MAX_CAMPAIGN_RUNTIME_MINUTES: ${MAX_CAMPAIGN_RUNTIME_MINUTES:-240}
+      MAX_PAGES_PER_LEAD: ${MAX_PAGES_PER_LEAD:-25}
+      PROXY_RETRY_COUNT: ${PROXY_RETRY_COUNT:-2}
+      BROWSER_FIRST: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - app-data:/app/data
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ROLE: dashboard
+      PORT: 3000
+      DASHBOARD_API_PROXY_TARGET: http://api:4000
+      NEXT_PUBLIC_API_BASE_URL: /api
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+  worker-browser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ROLE: worker-browser
+      RUN_MIGRATIONS: "0"
+      DATABASE_URL: postgresql://leadfactory:${POSTGRES_PASSWORD:-leadfactory}@postgres:5432/leadfactory
+      REDIS_URL: redis://redis:6379
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://73.72.215.253:11434/v1}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen2.5:14b}
+      LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-local}
+      APP_STORAGE_DIR: /app/data
+      SERVER_USAGE_PERCENT: ${SERVER_USAGE_PERCENT:-60}
+      MAX_BROWSERS_HARD_CAP: ${MAX_BROWSERS_HARD_CAP:-40}
+      MAX_QWEN_CONCURRENCY: ${MAX_QWEN_CONCURRENCY:-4}
+      MAX_CAMPAIGN_RUNTIME_MINUTES: ${MAX_CAMPAIGN_RUNTIME_MINUTES:-240}
+      MAX_PAGES_PER_LEAD: ${MAX_PAGES_PER_LEAD:-25}
+      PROXY_RETRY_COUNT: ${PROXY_RETRY_COUNT:-2}
+      BROWSER_HEADLESS: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    shm_size: "2gb"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - app-data:/app/data
+
+  worker-analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ROLE: worker-analysis
+      RUN_MIGRATIONS: "0"
+      DATABASE_URL: postgresql://leadfactory:${POSTGRES_PASSWORD:-leadfactory}@postgres:5432/leadfactory
+      REDIS_URL: redis://redis:6379
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://73.72.215.253:11434/v1}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen2.5:14b}
+      LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-local}
+      APP_STORAGE_DIR: /app/data
+      SERVER_USAGE_PERCENT: ${SERVER_USAGE_PERCENT:-60}
+      MAX_BROWSERS_HARD_CAP: ${MAX_BROWSERS_HARD_CAP:-40}
+      MAX_QWEN_CONCURRENCY: ${MAX_QWEN_CONCURRENCY:-4}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - app-data:/app/data
+
+volumes:
+  postgres-data:
+  redis-data:
+  app-data:
