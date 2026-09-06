@@ -1,18 +1,42 @@
 # Coolify Deployment
 
-This project is ready to deploy as a Docker Compose application in Coolify.
+This project is ready to deploy as either a single Dockerfile application or a
+Docker Compose application in Coolify.
 
 ## Recommended Coolify Setup
 
-Use `docker-compose.coolify.yml` as the Compose file.
+For the simplest deployment, use the root `Dockerfile`.
+
+Create or attach a Postgres database in Coolify, then set this environment
+variable on the application:
+
+```env
+DATABASE_URL=postgresql://...
+```
+
+Set the public application port to `3000`. The default container role is
+`standalone`, which starts:
+
+- Redis inside the container
+- Prisma migrations
+- API on internal port `4000`
+- dashboard on public port `3000`
+- browser worker
+- analysis worker
+
+In this mode, the public domain should point at the Dockerfile app itself.
+
+## Compose Setup
+
+Use `docker-compose.coolify.yml` as the Compose file when you want separate API,
+dashboard, Redis, and worker services.
 
 Expose only the dashboard service unless you want the API public:
 
 - `dashboard` port `3000`
 - `api` port `4000` can stay internal because the dashboard proxies `/api/*`
 
-Create or attach a Postgres database in Coolify, then set this environment
-variable on the application:
+Set the same Postgres connection string on the Compose application:
 
 ```env
 DATABASE_URL=postgresql://...
@@ -37,6 +61,7 @@ container for schema migration locks.
 
 The single Docker image supports these roles with `APP_ROLE`:
 
+- `standalone` default, runs dashboard, API, Redis, and workers in one container
 - `api`
 - `dashboard`
 - `worker-browser`

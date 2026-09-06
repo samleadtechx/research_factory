@@ -23,6 +23,7 @@ RUN apt-get update \
     python3 \
     python3-pip \
     python3-venv \
+    redis-server \
     xvfb \
   && rm -rf /var/lib/apt/lists/*
 
@@ -53,6 +54,6 @@ RUN chmod +x scripts/docker-entrypoint.sh \
 
 USER leadfactory
 
-EXPOSE 3000 4000
+EXPOSE 3000
 
 ENTRYPOINT ["dumb-init", "--", "/app/scripts/docker-entrypoint.sh"]

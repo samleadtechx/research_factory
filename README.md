@@ -86,7 +86,9 @@ Main tools:
 
 `DATABASE_URL` is the only required environment variable. Runtime settings are
 stored in Postgres and can be edited from the dashboard Settings panel or MCP.
-Postgres and Redis run in Docker for local development. Browser research uses Playwright first.
+Postgres and Redis run in Docker for local development. The production Dockerfile
+defaults to standalone mode, which runs Redis, API, dashboard, and workers in one
+container. Browser research uses Playwright first.
 Source, enrichment, and email verification providers are stored in Postgres and
 can be reused by future campaigns. Provider execution history is stored as
 provider runs, so bad providers can be disabled without deleting their history.
