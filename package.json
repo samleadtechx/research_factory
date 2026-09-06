@@ -38,8 +38,6 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@leadfactory/proxy-manager": "workspace:*",
-    "@leadfactory/scoring": "workspace:*",
     "@types/node": "^24.10.1",
     "typescript": "^5.9.3",
     "vitest": "^4.0.14"

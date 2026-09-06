@@ -18,12 +18,6 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
-      '@leadfactory/proxy-manager':
-        specifier: workspace:*
-        version: link:packages/proxy-manager
-      '@leadfactory/scoring':
-        specifier: workspace:*
-        version: link:packages/scoring
       '@types/node':
         specifier: ^24.10.1
         version: 24.13.3
