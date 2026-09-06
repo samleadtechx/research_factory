@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import { promisify } from "node:util";
@@ -188,24 +189,137 @@ async function readDiskUsage(pathToCheck: string): Promise<SystemCapacity["disk"
 }
 
 async function readGpu(): Promise<SystemCapacity["gpu"]> {
-  const output = await runCommand("nvidia-smi", [
+  const nvidiaSmiOutput = await runCommand("nvidia-smi", [
     "--query-gpu=name,memory.total,memory.used,utilization.gpu",
     "--format=csv,noheader,nounits"
   ]);
 
-  if (!output) return { available: false };
+  if (nvidiaSmiOutput) {
+    const gpu = parseNvidiaSmiGpu(nvidiaSmiOutput);
+    if (gpu) return gpu;
+  }
 
-  const first = output.split(/\r?\n/).find(Boolean);
-  if (!first) return { available: false };
+  const nvidiaProcGpu = await readNvidiaProcGpu();
+  if (nvidiaProcGpu) return nvidiaProcGpu;
+
+  const pciGpu = await readPciGpu();
+  if (pciGpu) return pciGpu;
+
+  const sysfsGpu = await readSysfsGpu();
+  if (sysfsGpu) return sysfsGpu;
+
+  return {
+    available: false,
+    detail: "No GPU visible inside this container. Expose the host GPU to the container for live metrics."
+  };
+}
+
+function parseNvidiaSmiGpu(output: string): SystemCapacity["gpu"] | null {
+  const lines = output.split(/\r?\n/).filter(Boolean);
+  const first = lines[0];
+  if (!first) return null;
 
   const [name, total, used, utilization] = first.split(",").map((part) => part.trim());
+  const totalMiB = finiteNumber(total);
+  const usedMiB = finiteNumber(used);
+  const utilizationPercent = finiteNumber(utilization);
+  return {
+    available: true,
+    name: lines.length > 1 ? `${name} (+${lines.length - 1})` : name,
+    memoryTotalMiB: totalMiB,
+    memoryUsedMiB: usedMiB,
+    utilizationPercent,
+    detectionSource: "nvidia-smi"
+  };
+}
+
+async function readNvidiaProcGpu(): Promise<SystemCapacity["gpu"] | null> {
+  try {
+    const gpuIds = await readdir("/proc/driver/nvidia/gpus");
+    const firstGpuId = gpuIds[0];
+    if (!firstGpuId) return null;
+
+    const info = await readFile(`/proc/driver/nvidia/gpus/${firstGpuId}/information`, "utf8");
+    const model = info.match(/^Model:\s*(.+)$/m)?.[1]?.trim();
+    return {
+      available: true,
+      name: model || "NVIDIA GPU",
+      detectionSource: "/proc/driver/nvidia",
+      detail: "Detected by the NVIDIA Linux driver. Expose nvidia-smi for utilization and VRAM metrics."
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readPciGpu(): Promise<SystemCapacity["gpu"] | null> {
+  const output = (await runCommand("lspci", ["-mm"])) ?? (await runCommand("lspci", []));
+  if (!output) return null;
+
+  const gpuLines = output.split(/\r?\n/).filter((line) => {
+    return (
+      /(VGA compatible controller|3D controller|Display controller)/i.test(line) &&
+      /(NVIDIA|Advanced Micro Devices|AMD|Intel)/i.test(line)
+    );
+  });
+  const first = gpuLines[0];
+  if (!first) return null;
+
+  const quoted = [...first.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  const vendor = quoted[1]?.replace("Advanced Micro Devices, Inc. [AMD/ATI]", "AMD");
+  const model = quoted[2];
+  const name = [vendor, model].filter(Boolean).join(" ").trim() || first.replace(/^[^\s]+\s+/, "").trim();
+
   return {
     available: true,
     name,
-    memoryTotalMiB: Number(total),
-    memoryUsedMiB: Number(used),
-    utilizationPercent: Number(utilization)
+    detectionSource: "lspci",
+    detail: "Detected by PCI scan. Expose nvidia-smi for utilization and VRAM metrics."
   };
+}
+
+async function readSysfsGpu(): Promise<SystemCapacity["gpu"] | null> {
+  try {
+    const entries = await readdir("/sys/bus/pci/devices");
+    for (const entry of entries) {
+      const deviceDir = `/sys/bus/pci/devices/${entry}`;
+      const [vendorRaw, classRaw, deviceRaw] = await Promise.all([
+        readFile(`${deviceDir}/vendor`, "utf8").catch(() => ""),
+        readFile(`${deviceDir}/class`, "utf8").catch(() => ""),
+        readFile(`${deviceDir}/device`, "utf8").catch(() => "")
+      ]);
+      const classCode = classRaw.trim().toLowerCase();
+      const vendorId = vendorRaw.trim().toLowerCase();
+      const isDisplayDevice = classCode.startsWith("0x03");
+      if (!isDisplayDevice) continue;
+
+      const vendorName = vendorNameFromPciId(vendorId);
+      if (!vendorName) continue;
+
+      return {
+        available: true,
+        name: `${vendorName} GPU ${deviceRaw.trim()}`.trim(),
+        detectionSource: "/sys/bus/pci",
+        detail: "Detected by Linux sysfs. Expose nvidia-smi for utilization and VRAM metrics."
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function finiteNumber(value: string): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function vendorNameFromPciId(vendorId: string): string | null {
+  if (vendorId === "0x10de") return "NVIDIA";
+  if (vendorId === "0x1002") return "AMD";
+  if (vendorId === "0x8086") return "Intel";
+  return null;
 }
 
 async function runCommand(command: string, args: string[]): Promise<string | null> {

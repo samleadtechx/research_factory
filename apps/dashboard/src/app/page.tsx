@@ -83,6 +83,8 @@ type HealthResponse = {
       memoryTotalMiB?: number;
       memoryUsedMiB?: number;
       utilizationPercent?: number;
+      detectionSource?: string;
+      detail?: string;
     };
   };
   modules: ModuleHealth[];
@@ -1374,12 +1376,8 @@ export default function DashboardPage() {
             <HealthMetric
               icon={<Server size={18} />}
               label="GPU"
-              value={health?.capacity.gpu.available ? `${health.capacity.gpu.utilizationPercent ?? 0}%` : "none"}
-              detail={
-                health?.capacity.gpu.available
-                  ? `${health.capacity.gpu.name ?? "GPU"} ${formatMiB(health.capacity.gpu.memoryUsedMiB)} / ${formatMiB(health.capacity.gpu.memoryTotalMiB)}`
-                  : "nvidia-smi not available"
-              }
+              value={formatGpuValue(health?.capacity.gpu)}
+              detail={formatGpuDetail(health?.capacity.gpu)}
             />
           </div>
 
@@ -1563,6 +1561,29 @@ function formatMiB(value?: number): string {
   if (typeof value !== "number" || Number.isNaN(value)) return "-";
   if (value >= 1024) return `${(value / 1024).toFixed(1)} GB`;
   return `${value} MB`;
+}
+
+function formatGpuValue(gpu?: HealthResponse["capacity"]["gpu"]): string {
+  if (!gpu?.available) return "none";
+  if (typeof gpu.utilizationPercent === "number" && !Number.isNaN(gpu.utilizationPercent)) {
+    return `${gpu.utilizationPercent}%`;
+  }
+  return "detected";
+}
+
+function formatGpuDetail(gpu?: HealthResponse["capacity"]["gpu"]): string {
+  if (!gpu?.available) {
+    return gpu?.detail ?? "No GPU visible inside this container";
+  }
+
+  const name = gpu.name ?? "GPU";
+  const hasMemory = typeof gpu.memoryUsedMiB === "number" || typeof gpu.memoryTotalMiB === "number";
+  if (hasMemory) {
+    return `${name} ${formatMiB(gpu.memoryUsedMiB)} / ${formatMiB(gpu.memoryTotalMiB)}`;
+  }
+
+  if (gpu.detectionSource) return `${name} via ${gpu.detectionSource}`;
+  return name;
 }
 
 function formatNumber(value?: number): string {

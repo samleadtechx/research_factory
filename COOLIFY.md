@@ -107,3 +107,24 @@ ulimits:
 Start with server usage at `40` to `60` percent in the dashboard Settings panel,
 then raise it after watching CPU, RAM, proxy failure rate, and Qwen latency in
 the dashboard health section.
+
+## GPU Visibility
+
+The dashboard health card now checks `nvidia-smi`, `/proc/driver/nvidia`,
+`lspci`, and Linux PCI sysfs. It can show a detected GPU even when utilization
+and VRAM metrics are not exposed to the container.
+
+For live utilization and VRAM metrics, install NVIDIA drivers and NVIDIA
+Container Toolkit on the Coolify host, then expose the GPU to the application
+container. For Compose deployments, add a GPU device reservation to the service
+that runs the API/standalone app:
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+```

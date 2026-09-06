@@ -20,6 +20,7 @@ RUN apt-get update \
     curl \
     dumb-init \
     openssl \
+    pciutils \
     python3 \
     python3-pip \
     python3-venv \

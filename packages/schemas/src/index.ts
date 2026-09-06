@@ -286,7 +286,9 @@ export const SystemCapacitySchema = z.object({
       name: z.string().optional(),
       memoryTotalMiB: z.number().optional(),
       memoryUsedMiB: z.number().optional(),
-      utilizationPercent: z.number().optional()
+      utilizationPercent: z.number().optional(),
+      detectionSource: z.string().optional(),
+      detail: z.string().optional()
     })
     .default({ available: false })
 });
