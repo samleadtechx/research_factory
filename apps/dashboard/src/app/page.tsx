@@ -350,6 +350,51 @@ function buildCodexCliCommand(remoteMcpUrl: string, bearerToken: string): string
   return command.join(" ");
 }
 
+function buildReadyCodexConfig(codexTomlConfig: string, bearerToken: string): string {
+  const lines = ["# Paste into ~/.codex/config.toml", codexTomlConfig];
+
+  if (bearerToken.trim()) {
+    lines.push("", "# LEADFACTORY_MCP_TOKEN must be available in the shell/session where Codex runs.");
+  }
+
+  return lines.join("\n");
+}
+
+function buildReadyCodexConnectInstructions(
+  codexTomlConfig: string,
+  codexCliCommand: string,
+  remoteMcpUrl: string,
+  bearerToken: string
+): string {
+  const tokenCommand = bearerToken.trim()
+    ? `export LEADFACTORY_MCP_TOKEN=${shellQuote(bearerToken)}`
+    : "# Set MCP Token in the dashboard Runtime Settings first, then copy this section again.";
+  const tokenStep = bearerToken.trim()
+    ? `2. Run this in the same shell/session where Codex runs:\n\n${tokenCommand}`
+    : "2. No MCP token is configured. For a public domain, set MCP Token in this dashboard first, save Runtime Settings, then copy this again.";
+
+  return `Connect Codex to Lead Research Factory
+
+Remote MCP URL:
+${remoteMcpUrl}
+
+Option A - config file:
+1. Open ~/.codex/config.toml on the machine where Codex runs.
+${tokenStep}
+3. Add this block to ~/.codex/config.toml:
+
+${codexTomlConfig}
+
+4. Restart Codex, or reload MCP servers from the Codex MCP settings.
+5. In Codex, run /mcp and confirm lead-research-factory is connected.
+
+Option B - CLI:
+${codexCliCommand}
+
+After it connects, tell Codex:
+Use the lead-research-factory MCP server as the control plane. Check system_health, system_stats, and get_runtime_settings first, then create and manage lead research campaigns through MCP tools.`;
+}
+
 function buildCodexInstructions(publicAppUrl: string, mcpApiBaseUrl: string, remoteMcpUrl: string): string {
   return `Use the lead-research-factory MCP server as the control plane for lead research.
 
@@ -425,10 +470,20 @@ App endpoints:
 function buildAllMcpInstructions(
   codexTomlConfig: string,
   codexCliCommand: string,
+  readyCodexConfig: string,
+  readyCodexConnectInstructions: string,
   mcpConfig: string,
   codexInstructions: string
 ): string {
-  return `Codex config.toml:
+  return `Ready Codex config:
+
+${readyCodexConfig}
+
+Ready Codex connection instructions:
+
+${readyCodexConnectInstructions}
+
+Codex config.toml:
 
 ${codexTomlConfig}
 
@@ -595,13 +650,29 @@ export default function DashboardPage() {
     () => buildCodexCliCommand(remoteMcpUrl, mcpBearerToken),
     [remoteMcpUrl, mcpBearerToken]
   );
+  const readyCodexConfig = useMemo(
+    () => buildReadyCodexConfig(codexTomlConfig, mcpBearerToken),
+    [codexTomlConfig, mcpBearerToken]
+  );
+  const readyCodexConnectInstructions = useMemo(
+    () => buildReadyCodexConnectInstructions(codexTomlConfig, codexCliCommand, remoteMcpUrl, mcpBearerToken),
+    [codexTomlConfig, codexCliCommand, remoteMcpUrl, mcpBearerToken]
+  );
   const codexInstructions = useMemo(
     () => buildCodexInstructions(normalizedPublicAppUrl, mcpApiBaseUrl, remoteMcpUrl),
     [normalizedPublicAppUrl, mcpApiBaseUrl, remoteMcpUrl]
   );
   const allMcpInstructions = useMemo(
-    () => buildAllMcpInstructions(codexTomlConfig, codexCliCommand, mcpConfig, codexInstructions),
-    [codexTomlConfig, codexCliCommand, mcpConfig, codexInstructions]
+    () =>
+      buildAllMcpInstructions(
+        codexTomlConfig,
+        codexCliCommand,
+        readyCodexConfig,
+        readyCodexConnectInstructions,
+        mcpConfig,
+        codexInstructions
+      ),
+    [codexTomlConfig, codexCliCommand, readyCodexConfig, readyCodexConnectInstructions, mcpConfig, codexInstructions]
   );
 
   useEffect(() => {
@@ -1038,6 +1109,14 @@ export default function DashboardPage() {
         <div className="panelHeader">
           <h2>MCP Settings</h2>
           <div className="copyActions">
+            <button className="copyButton" onClick={() => copyText(readyCodexConfig, "ready-config")}>
+              {copiedTarget === "ready-config" ? <Check size={16} /> : <Copy size={16} />}
+              <span>Ready Config</span>
+            </button>
+            <button className="copyButton" onClick={() => copyText(readyCodexConnectInstructions, "ready-connect")}>
+              {copiedTarget === "ready-connect" ? <Check size={16} /> : <Copy size={16} />}
+              <span>Connect</span>
+            </button>
             <button className="copyButton" onClick={() => copyText(codexTomlConfig, "codex-config")}>
               {copiedTarget === "codex-config" ? <Check size={16} /> : <Copy size={16} />}
               <span>Codex Config</span>
@@ -1075,6 +1154,30 @@ export default function DashboardPage() {
             <RefreshCw size={16} />
             <span>Current</span>
           </button>
+        </div>
+
+        <div className="readyCopyGrid">
+          <div className="settingsBlock readyCopyBlock">
+            <div className="blockTitle">
+              <strong>Ready config</strong>
+              <button className="copyButton" onClick={() => copyText(readyCodexConfig, "ready-config-block")}>
+                {copiedTarget === "ready-config-block" ? <Check size={16} /> : <Copy size={16} />}
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre>{readyCodexConfig}</pre>
+          </div>
+
+          <div className="settingsBlock readyCopyBlock">
+            <div className="blockTitle">
+              <strong>How to connect Codex</strong>
+              <button className="copyButton" onClick={() => copyText(readyCodexConnectInstructions, "ready-connect-block")}>
+                {copiedTarget === "ready-connect-block" ? <Check size={16} /> : <Copy size={16} />}
+                <span>Copy</span>
+              </button>
+            </div>
+            <pre>{readyCodexConnectInstructions}</pre>
+          </div>
         </div>
 
         <div className="runtimePanel">

@@ -461,6 +461,17 @@ input[type="range"] {
   grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.05fr);
 }
 
+.readyCopyGrid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(320px, 0.85fr) minmax(420px, 1.15fr);
+  margin-bottom: 16px;
+}
+
+.readyCopyBlock pre {
+  max-height: 420px;
+}
+
 .runtimePanel,
 .proxyPanel {
   border: 1px solid var(--line);
@@ -810,8 +821,13 @@ input[type="range"] {
   background: #f9fbfd;
   border-bottom: 1px solid var(--line);
   display: flex;
+  gap: 10px;
   justify-content: space-between;
   padding: 10px 12px;
+}
+
+.blockTitle .copyButton {
+  min-height: 30px;
 }
 
 .blockTitle span {
@@ -894,6 +910,10 @@ th {
   }
 
   .settingsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .readyCopyGrid {
     grid-template-columns: 1fr;
   }
 
