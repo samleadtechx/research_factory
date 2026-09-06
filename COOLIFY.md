@@ -11,19 +11,16 @@ Expose only the dashboard service unless you want the API public:
 - `dashboard` port `3000`
 - `api` port `4000` can stay internal because the dashboard proxies `/api/*`
 
-Set these environment variables in Coolify:
+Set this environment variable in Coolify:
 
 ```env
 POSTGRES_PASSWORD=change-this-password
-LOCAL_LLM_BASE_URL=http://73.72.215.253:11434/v1
-LOCAL_LLM_MODEL=qwen2.5:14b
-LOCAL_LLM_API_KEY=local
-SERVER_USAGE_PERCENT=60
-MAX_BROWSERS_HARD_CAP=40
-MAX_QWEN_CONCURRENCY=4
-MAX_PAGES_PER_LEAD=25
-PROXY_RETRY_COUNT=2
 ```
+
+The Compose file turns that into each service's `DATABASE_URL`. Runtime values
+such as Redis URL, local LLM endpoint/model, storage path, server usage percent,
+browser cap, Qwen concurrency, campaign timeouts, page limits, and retry counts
+are managed from the dashboard Settings panel or through the MCP tools.
 
 The API container runs Prisma migrations automatically on boot:
 
@@ -81,5 +78,6 @@ ulimits:
     hard: 65535
 ```
 
-Start with `SERVER_USAGE_PERCENT=40` to `60`, then raise it after watching CPU,
-RAM, proxy failure rate, and Qwen latency in the dashboard health section.
+Start with server usage at `40` to `60` percent in the dashboard Settings panel,
+then raise it after watching CPU, RAM, proxy failure rate, and Qwen latency in
+the dashboard health section.
