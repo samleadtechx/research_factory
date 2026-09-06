@@ -420,6 +420,41 @@ input[type="range"] {
   color: #ffffff;
 }
 
+.mcpEndpointRow {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) auto;
+  margin-bottom: 16px;
+}
+
+.publicUrlField {
+  min-width: 0;
+}
+
+.endpointPreview {
+  background: #f9fbfd;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-height: 58px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.endpointPreview span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.endpointPreview strong {
+  font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .settingsGrid {
   display: grid;
   gap: 16px;
@@ -859,6 +894,11 @@ th {
   }
 
   .settingsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .mcpEndpointRow {
+    align-items: stretch;
     grid-template-columns: 1fr;
   }
 

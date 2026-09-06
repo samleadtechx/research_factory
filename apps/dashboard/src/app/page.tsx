@@ -293,20 +293,29 @@ const emptySavedProviderSummary: ProviderListSummary = {
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api";
 const workspacePath = "/Users/bizrate/Documents/ChatGPT/Research_factory";
-const mcpConfig = `{
-  "mcpServers": {
-    "lead-research-factory": {
-      "command": "/bin/bash",
-      "args": [
-        "${workspacePath}/scripts/start-mcp.sh"
-      ],
-      "env": {
-        "API_BASE_URL": "http://localhost:4000"
+const defaultPublicAppUrl = "http://localhost:3000";
+const publicAppUrlStorageKey = "leadfactory.publicAppUrl";
+
+function buildMcpConfig(mcpApiBaseUrl: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        "lead-research-factory": {
+          command: "/bin/bash",
+          args: [`${workspacePath}/scripts/start-mcp.sh`],
+          env: {
+            API_BASE_URL: mcpApiBaseUrl
+          }
+        }
       }
-    }
-  }
-}`;
-const codexInstructions = `Use the lead-research-factory MCP server as the control plane for lead research.
+    },
+    null,
+    2
+  );
+}
+
+function buildCodexInstructions(publicAppUrl: string, mcpApiBaseUrl: string): string {
+  return `Use the lead-research-factory MCP server as the control plane for lead research.
 
 Operating model:
 - Codex is the research director.
@@ -371,17 +380,60 @@ Currently wired MCP tools:
 - system_health
 - list_proxies
 
-Local app:
-- Dashboard: http://localhost:3000
-- API: http://localhost:4000
+App endpoints:
+- Dashboard: ${publicAppUrl}
+- API base: ${mcpApiBaseUrl}
 - MCP stdio launcher: ${workspacePath}/scripts/start-mcp.sh`;
-const allMcpInstructions = `MCP config:
+}
+
+function buildAllMcpInstructions(mcpConfig: string, codexInstructions: string): string {
+  return `MCP config:
 
 ${mcpConfig}
 
 Codex instructions:
 
 ${codexInstructions}`;
+}
+
+function normalizePublicAppUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return defaultPublicAppUrl;
+  const withProtocol = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+
+  try {
+    const url = new URL(withProtocol);
+    url.hash = "";
+    url.search = "";
+    if (url.pathname.replace(/\/+$/, "") === "/api") url.pathname = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return trimmed.replace(/\/$/, "");
+  }
+}
+
+function deriveMcpApiBaseUrl(publicAppUrl: string): string {
+  try {
+    const url = new URL(publicAppUrl);
+    const isLocalhost = ["localhost", "127.0.0.1", "0.0.0.0"].includes(url.hostname);
+    const normalizedPath = url.pathname.replace(/\/+$/, "");
+
+    if (normalizedPath.endsWith("/api") || url.port === "4000") {
+      return url.toString().replace(/\/$/, "");
+    }
+
+    if (isLocalhost && (!url.port || url.port === "3000")) {
+      url.port = "4000";
+      url.pathname = normalizedPath || "/";
+      return url.toString().replace(/\/$/, "");
+    }
+
+    url.pathname = `${normalizedPath || ""}/api`;
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return publicAppUrl.replace(/\/$/, "");
+  }
+}
 
 export default function DashboardPage() {
   const [campaigns, setCampaigns] = useState<CampaignSummary[]>([]);
@@ -394,6 +446,8 @@ export default function DashboardPage() {
   const [leadError, setLeadError] = useState<string | null>(null);
   const [isRefreshingLeads, setIsRefreshingLeads] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
+  const [publicAppUrl, setPublicAppUrl] = useState(defaultPublicAppUrl);
+  const [isPublicAppUrlLoaded, setIsPublicAppUrlLoaded] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [isRefreshingHealth, setIsRefreshingHealth] = useState(false);
@@ -459,9 +513,32 @@ export default function DashboardPage() {
     [sourceRecipeSummary, enrichmentProviderSummary, emailVerificationProviderSummary]
   );
 
+  const normalizedPublicAppUrl = useMemo(() => normalizePublicAppUrl(publicAppUrl), [publicAppUrl]);
+  const mcpApiBaseUrl = useMemo(() => deriveMcpApiBaseUrl(normalizedPublicAppUrl), [normalizedPublicAppUrl]);
+  const mcpConfig = useMemo(() => buildMcpConfig(mcpApiBaseUrl), [mcpApiBaseUrl]);
+  const codexInstructions = useMemo(
+    () => buildCodexInstructions(normalizedPublicAppUrl, mcpApiBaseUrl),
+    [normalizedPublicAppUrl, mcpApiBaseUrl]
+  );
+  const allMcpInstructions = useMemo(
+    () => buildAllMcpInstructions(mcpConfig, codexInstructions),
+    [mcpConfig, codexInstructions]
+  );
+
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(publicAppUrlStorageKey);
+    setPublicAppUrl(stored || window.location.origin);
+    setIsPublicAppUrlLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isPublicAppUrlLoaded) return;
+    window.localStorage.setItem(publicAppUrlStorageKey, publicAppUrl);
+  }, [publicAppUrl, isPublicAppUrlLoaded]);
 
   async function refreshAll() {
     await Promise.all([refreshCampaigns(), refreshHealth(), refreshRuntimeSettings(), refreshProxies(), refreshSourceRecipes()]);
@@ -895,6 +972,26 @@ export default function DashboardPage() {
               <span>All</span>
             </button>
           </div>
+        </div>
+
+        <div className="mcpEndpointRow">
+          <label className="runtimeField publicUrlField">
+            <span>Public App URL</span>
+            <input
+              type="url"
+              value={publicAppUrl}
+              onChange={(event) => setPublicAppUrl(event.target.value)}
+              placeholder="https://factory.leadtechx.com"
+            />
+          </label>
+          <div className="endpointPreview">
+            <span>API_BASE_URL</span>
+            <strong>{mcpApiBaseUrl}</strong>
+          </div>
+          <button className="copyButton" onClick={() => setPublicAppUrl(window.location.origin)}>
+            <RefreshCw size={16} />
+            <span>Current</span>
+          </button>
         </div>
 
         <div className="runtimePanel">
