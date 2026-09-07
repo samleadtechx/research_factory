@@ -133,7 +133,7 @@ server.registerTool(
     title: "Create Campaign",
     description: "Create and immediately queue a prompt-driven lead research campaign.",
     inputSchema: {
-      prompt: z.string().min(20),
+      prompt: z.string().min(3),
       name: z.string().optional(),
       targetLeadCount: z.number().int().positive().optional(),
       serverUsagePercent: z.number().int().min(1).max(100).optional()

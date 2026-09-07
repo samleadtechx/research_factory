@@ -160,7 +160,7 @@ export const RuntimeSettingsUpdateSchema = z.object({
 });
 
 export const CreateCampaignInputSchema = z.object({
-  prompt: z.string().trim().min(20),
+  prompt: z.string().trim().min(3),
   name: z.string().trim().min(1).max(160).optional(),
   targetLeadCount: z.number().int().min(1).max(100000).optional(),
   serverUsagePercent: z.number().int().min(1).max(100).optional()

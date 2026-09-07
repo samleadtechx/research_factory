@@ -537,7 +537,7 @@ api.post("/campaigns", async (request) => {
     model: runtimeSettings.localLlmModel,
     apiKey: runtimeSettings.localLlmApiKey
   });
-  const plan = await planCampaign({ prompt: input.prompt, llm });
+  const plan = await planCampaign({ prompt: input.prompt, llm, name: input.name });
   const settings = {
     ...runtimeSettings,
     ...(input.serverUsagePercent ? { serverUsagePercent: input.serverUsagePercent } : {})
