@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
+import { parse as parseCsv } from "csv-parse/sync";
 import { planCampaign } from "@leadfactory/campaign-planner";
 import { prisma, Prisma } from "@leadfactory/database";
 import {
@@ -25,9 +27,12 @@ import { defaultRuntimeSettings, readRuntimeSettings, updateRuntimeSettings } fr
 import {
   CreateCampaignInputSchema,
   CampaignPlanSchema,
+  ImportCampaignCsvInputSchema,
   ProxyUploadSchema,
   RuntimeSettingsUpdateSchema,
-  type CampaignPlan
+  type CampaignPlan,
+  type CreateCampaignInput,
+  type ImportCampaignCsvInput
 } from "@leadfactory/schemas";
 import {
   CreateEmailVerificationProviderInputSchema,
@@ -537,10 +542,14 @@ api.post("/campaigns", async (request) => {
     model: runtimeSettings.localLlmModel,
     apiKey: runtimeSettings.localLlmApiKey
   });
-  const plan = await planCampaign({ prompt: input.prompt, llm, name: input.name });
+  const plannedCampaign = await planCampaign({ prompt: input.prompt, llm, name: input.name });
+  const plan = applyCampaignSourceOverrides(plannedCampaign, input);
   const settings = {
     ...runtimeSettings,
-    ...(input.serverUsagePercent ? { serverUsagePercent: input.serverUsagePercent } : {})
+    ...(input.serverUsagePercent ? { serverUsagePercent: input.serverUsagePercent } : {}),
+    sourceRecipeIds: plan.sourceRecipeIds,
+    sourceRecipeNames: plan.sourceRecipeNames,
+    strictSourceRecipes: plan.strictSourceRecipes
   };
 
   const campaign = await prisma.campaign.create({
@@ -566,7 +575,12 @@ api.post("/campaigns", async (request) => {
         create: {
           type: "campaign_created",
           message: "Campaign created through API/MCP and queued for discovery.",
-          metadata: { source: "api" }
+          metadata: {
+            source: "api",
+            sourceRecipeIds: plan.sourceRecipeIds,
+            sourceRecipeNames: plan.sourceRecipeNames,
+            strictSourceRecipes: plan.strictSourceRecipes
+          }
         }
       }
     }
@@ -665,6 +679,32 @@ api.get("/campaigns/:campaignId/leads", async (request) => {
         quote: evidence.quote
       }))
     }))
+  };
+});
+
+api.post("/campaigns/:campaignId/import-csv", async (request, reply) => {
+  const { campaignId } = request.params as { campaignId: string };
+  const input = ImportCampaignCsvInputSchema.parse(request.body ?? {});
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
+  if (!campaign) return reply.status(404).send({ error: "campaign_not_found" });
+
+  let rows: CsvRow[];
+  try {
+    rows = parseCampaignCsv(input.csvText);
+  } catch (error) {
+    return reply.status(400).send({
+      error: "invalid_csv",
+      message: error instanceof Error ? error.message : "CSV could not be parsed"
+    });
+  }
+
+  const importResult = await importCampaignCsvRows(campaignId, rows, input);
+  await rerankCampaign(campaignId);
+  await refreshCampaignProgress(campaignId);
+
+  return {
+    campaignId,
+    ...importResult
   };
 });
 
@@ -935,6 +975,619 @@ function normalizeProgress(value: unknown): ReturnType<typeof emptyProgress> {
   };
 }
 
+type CsvRow = Record<string, string>;
+
+type ImportedPerson = {
+  name: string;
+  role: string;
+  email?: string;
+};
+
+type ImportedLeadRecord = {
+  companyName: string;
+  normalizedName: string;
+  website?: string;
+  domain?: string;
+  sourceUrl?: string;
+  phone?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  emails: string[];
+  owners: ImportedPerson[];
+  managers: ImportedPerson[];
+  decisionMakers: ImportedPerson[];
+  googleReviewCount?: number;
+  score?: number;
+  confidence?: number;
+  rank?: number;
+  raw: CsvRow;
+};
+
+function applyCampaignSourceOverrides(plan: CampaignPlan, input: CreateCampaignInput): CampaignPlan {
+  const sourceRecipeIds = uniqueTrimmedStrings(input.sourceRecipeIds ?? plan.sourceRecipeIds);
+  const sourceRecipeNames = uniqueTrimmedStrings(input.sourceRecipeNames ?? plan.sourceRecipeNames);
+  const hasPinnedRecipes = sourceRecipeIds.length > 0 || sourceRecipeNames.length > 0;
+
+  return CampaignPlanSchema.parse({
+    ...plan,
+    sourceRecipeIds,
+    sourceRecipeNames,
+    strictSourceRecipes: input.strictSourceRecipes ?? (hasPinnedRecipes ? true : plan.strictSourceRecipes)
+  });
+}
+
+function parseCampaignCsv(csvText: string): CsvRow[] {
+  return parseCsv(csvText, {
+    bom: true,
+    columns: true,
+    relaxColumnCount: true,
+    relaxQuotes: true,
+    skipEmptyLines: true,
+    trim: true
+  }) as CsvRow[];
+}
+
+async function importCampaignCsvRows(campaignId: string, rows: CsvRow[], input: ImportCampaignCsvInput) {
+  const results: Array<{
+    rowNumber: number;
+    leadId: string;
+    companyId: string;
+    companyName: string;
+    createdLead: boolean;
+    score: number;
+  }> = [];
+  const skipped: Array<{ rowNumber: number; reason: string }> = [];
+
+  for (const [index, row] of rows.entries()) {
+    const rowNumber = index + 2;
+    const parsed = parseImportedLeadRow(row);
+    if (!parsed) {
+      skipped.push({ rowNumber, reason: "missing company name, website, or source URL" });
+      continue;
+    }
+
+    const imported = await upsertImportedLead(campaignId, parsed, input, rowNumber);
+    results.push({
+      rowNumber,
+      leadId: imported.leadId,
+      companyId: imported.companyId,
+      companyName: parsed.companyName,
+      createdLead: imported.createdLead,
+      score: imported.score
+    });
+  }
+
+  return {
+    rows: rows.length,
+    imported: results.length,
+    created: results.filter((result) => result.createdLead).length,
+    updated: results.filter((result) => !result.createdLead).length,
+    skipped,
+    leads: results.slice(0, 25)
+  };
+}
+
+function parseImportedLeadRow(row: CsvRow): ImportedLeadRecord | null {
+  const lookup = createCsvLookup(row);
+  const pick = (aliases: string[]) => pickCsvValue(lookup, aliases);
+  const sourceUrl = normalizeInputUrl(
+    pick([
+      "source_url",
+      "source",
+      "profile_url",
+      "profile",
+      "business_profile",
+      "google_maps_url",
+      "google_map_url",
+      "maps_url",
+      "listing_url",
+      "url"
+    ])
+  );
+  const explicitWebsite = normalizeInputUrl(
+    pick(["website", "company_website", "business_website", "site", "homepage", "web"])
+  );
+  const website = explicitWebsite ?? (sourceUrl && !isBusinessProfileUrl(sourceUrl) ? sourceUrl : undefined);
+  const domain = normalizeDomain(pick(["domain", "company_domain", "business_domain"])) ?? domainFromUrl(website);
+  const fallbackUrl = website ?? sourceUrl;
+  const companyName =
+    pick(["company", "company_name", "companyname", "business", "business_name", "businessname", "name"]) ??
+    inferNameFromUrl(fallbackUrl);
+
+  if (!companyName) return null;
+
+  const location = pick(["location", "address", "city_state", "citystate"]);
+  const locationParts = location?.split(",").map((part) => part.trim()).filter(Boolean) ?? [];
+  const city = pick(["city", "town", "locality"]) ?? (locationParts.length >= 2 ? locationParts[0] : undefined);
+  const state = pick(["state", "province", "region"]) ?? inferStateFromLocation(locationParts);
+  const country = pick(["country"]) ?? (locationParts.length >= 3 ? locationParts[2] : undefined);
+  const emails = uniqueTrimmedStrings([
+    ...extractEmailsFromText(pick(["email", "emails", "public_email", "public_emails", "business_email", "contact_email"]) ?? ""),
+    ...extractEmailsFromText(JSON.stringify(row))
+  ]);
+  const owners = parsePeople(pick(["owner", "owners", "owner_name", "owner_names", "founder", "founders"]), "owner");
+  const managers = parsePeople(pick(["manager", "managers", "manager_name", "manager_names"]), "manager");
+  const decisionMakers = parsePeople(
+    pick(["decision_maker", "decision_makers", "decisionmaker", "contact", "contacts", "person", "people"]),
+    "decision maker"
+  );
+  const googleReviewCount = parseIntegerCell(
+    pick([
+      "googleReviewCount",
+      "google_review_count",
+      "google_reviews_count",
+      "google_reviews",
+      "reviewCount",
+      "review_count",
+      "reviews"
+    ])
+  );
+  const score = clampInteger(parseIntegerCell(pick(["score", "lead_score", "rank_score"])), 0, 100);
+  const confidence = parseConfidenceCell(pick(["confidence", "confidence_score"]));
+  const rank = clampInteger(parseIntegerCell(pick(["rank", "ranking"])), 1, 100000);
+
+  return {
+    companyName: companyName.slice(0, 160),
+    normalizedName: normalizeCompanyName(companyName),
+    website: website && !isBusinessProfileUrl(website) ? website : undefined,
+    domain: domain && !isBusinessProfileDomain(domain) ? domain : undefined,
+    sourceUrl,
+    phone: pick(["phone", "phone_number", "telephone", "business_phone"]),
+    city,
+    state,
+    country,
+    emails,
+    owners,
+    managers,
+    decisionMakers,
+    googleReviewCount,
+    score,
+    confidence,
+    rank,
+    raw: normalizeCsvRow(row)
+  };
+}
+
+async function upsertImportedLead(
+  campaignId: string,
+  record: ImportedLeadRecord,
+  input: ImportCampaignCsvInput,
+  rowNumber: number
+) {
+  const company = await upsertImportedCompany(record, input, rowNumber);
+  const existingLead = await prisma.lead.findFirst({
+    where: {
+      campaignId,
+      companyId: company.id
+    }
+  });
+  const confidence = record.confidence ?? estimateImportConfidence(record);
+  const score = input.markRanked ? record.score ?? calculateImportedScore(record) : existingLead?.score ?? 0;
+  const status = input.markRanked ? "ranked" : "researched";
+  const signal = strongestImportedSignal(record);
+  const exportSnapshot = toInputJson({
+    companyName: record.companyName,
+    website: record.website,
+    location: [record.city, record.state, record.country].filter(Boolean).join(", "),
+    publicEmails: record.emails,
+    owners: record.owners,
+    managers: mergePeople(record.managers, record.decisionMakers),
+    googleReviewCount: record.googleReviewCount,
+    importedCsv: {
+      sourceName: input.sourceName,
+      sourceUrl: input.sourceUrl,
+      rowNumber,
+      raw: record.raw
+    }
+  });
+  const scoreComponents = toInputJson({
+    importedCsv: true,
+    sourceName: input.sourceName,
+    rowNumber,
+    googleReviewCount: record.googleReviewCount,
+    evidence: "Imported by Codex/MCP from a verified CSV scrape."
+  });
+  const lead = existingLead
+    ? await prisma.lead.update({
+        where: { id: existingLead.id },
+        data: {
+          status,
+          score: Math.max(existingLead.score, score),
+          confidence: Math.max(existingLead.confidence, confidence),
+          strongestSignal: existingLead.strongestSignal ?? signal,
+          scoreComponents,
+          rank: record.rank ?? existingLead.rank,
+          exportSnapshot
+        }
+      })
+    : await prisma.lead.create({
+        data: {
+          campaignId,
+          companyId: company.id,
+          status,
+          score,
+          confidence,
+          strongestSignal: signal,
+          scoreComponents,
+          rank: record.rank,
+          exportSnapshot
+        }
+      });
+
+  const evidenceIds = await createImportedEvidence(campaignId, company.id, lead.id, record, input, rowNumber);
+  await createImportClaims(campaignId, company.id, lead.id, record, evidenceIds);
+
+  return {
+    leadId: lead.id,
+    companyId: company.id,
+    createdLead: !existingLead,
+    score
+  };
+}
+
+async function upsertImportedCompany(record: ImportedLeadRecord, input: ImportCampaignCsvInput, rowNumber: number) {
+  const companyFilters: Prisma.CompanyWhereInput[] = [];
+  if (record.website) companyFilters.push({ website: record.website });
+  if (record.domain) companyFilters.push({ domain: record.domain });
+  if (record.normalizedName && (record.city || record.state)) {
+    companyFilters.push({
+      normalizedName: record.normalizedName,
+      ...(record.city ? { city: record.city } : {}),
+      ...(record.state ? { state: record.state } : {})
+    });
+  }
+
+  const existingCompany = companyFilters.length
+    ? await prisma.company.findFirst({
+        where: { OR: companyFilters }
+      })
+    : null;
+  const people = mergePeople(record.managers, record.decisionMakers);
+  const metadata = toInputJson({
+    ...readJsonObject(existingCompany?.metadata),
+    csvImport: {
+      sourceName: input.sourceName,
+      sourceUrl: input.sourceUrl,
+      rowNumber,
+      googleReviewCount: record.googleReviewCount,
+      importedAt: new Date().toISOString(),
+      raw: record.raw
+    }
+  });
+
+  if (existingCompany) {
+    const emails = mergeStringArrays(readJsonStringArray(existingCompany.emails), record.emails);
+    const owners = mergePeople(readJsonPeople(existingCompany.owners), record.owners);
+    const managers = mergePeople(readJsonPeople(existingCompany.managers), people);
+    return prisma.company.update({
+      where: { id: existingCompany.id },
+      data: {
+        companyName: existingCompany.companyName || record.companyName,
+        normalizedName: existingCompany.normalizedName ?? record.normalizedName,
+        domain: existingCompany.domain ?? record.domain,
+        website: existingCompany.website ?? record.website,
+        city: existingCompany.city ?? record.city,
+        state: existingCompany.state ?? record.state,
+        country: existingCompany.country ?? record.country,
+        phone: existingCompany.phone ?? record.phone,
+        generalEmail: existingCompany.generalEmail ?? emails[0],
+        emails: emails.length ? toInputJson(emails) : undefined,
+        owners: owners.length ? toInputJson(owners) : undefined,
+        managers: managers.length ? toInputJson(managers) : undefined,
+        metadata,
+        lastCheckedAt: new Date()
+      }
+    });
+  }
+
+  return prisma.company.create({
+    data: {
+      companyName: record.companyName,
+      normalizedName: record.normalizedName,
+      domain: record.domain,
+      website: record.website,
+      city: record.city,
+      state: record.state,
+      country: record.country,
+      phone: record.phone,
+      generalEmail: record.emails[0],
+      emails: record.emails.length ? toInputJson(record.emails) : undefined,
+      owners: record.owners.length ? toInputJson(record.owners) : undefined,
+      managers: people.length ? toInputJson(people) : undefined,
+      metadata,
+      lastCheckedAt: new Date()
+    }
+  });
+}
+
+async function createImportedEvidence(
+  campaignId: string,
+  companyId: string,
+  leadId: string,
+  record: ImportedLeadRecord,
+  input: ImportCampaignCsvInput,
+  rowNumber: number
+): Promise<string[]> {
+  const evidenceIds: string[] = [];
+  const evidenceUrl = record.sourceUrl ?? input.sourceUrl ?? record.website ?? "manual://csv-import";
+  const sourceType = inferImportSourceType(evidenceUrl, input.sourceName);
+  const baseEvidence = await createManualEvidence({
+    campaignId,
+    companyId,
+    leadId,
+    field: "imported_csv_row",
+    sourceType,
+    url: evidenceUrl,
+    quote: `Imported verified row ${rowNumber} from ${input.sourceName}: ${record.companyName}`,
+    metadata: toInputJson({
+      sourceName: input.sourceName,
+      sourceUrl: input.sourceUrl,
+      rowNumber,
+      raw: record.raw
+    })
+  });
+  if (baseEvidence) evidenceIds.push(baseEvidence.id);
+
+  if (record.website) {
+    const evidence = await createManualEvidence({
+      campaignId,
+      companyId,
+      leadId,
+      field: "company_website",
+      sourceType: "company_website",
+      url: record.website,
+      quote: `${record.companyName} website: ${record.website}`
+    });
+    if (evidence) evidenceIds.push(evidence.id);
+  }
+
+  for (const email of record.emails.slice(0, 20)) {
+    const evidence = await createManualEvidence({
+      campaignId,
+      companyId,
+      leadId,
+      field: "public_email",
+      sourceType,
+      url: evidenceUrl,
+      quote: `${record.companyName} published business email: ${email}`
+    });
+    if (evidence) evidenceIds.push(evidence.id);
+  }
+
+  for (const person of mergePeople(record.owners, record.managers, record.decisionMakers).slice(0, 20)) {
+    const evidence = await createManualEvidence({
+      campaignId,
+      companyId,
+      leadId,
+      field: "owner_manager_name",
+      sourceType,
+      url: evidenceUrl,
+      quote: `${person.name} - ${person.role}`
+    });
+    if (evidence) evidenceIds.push(evidence.id);
+  }
+
+  if (typeof record.googleReviewCount === "number") {
+    const evidence = await createManualEvidence({
+      campaignId,
+      companyId,
+      leadId,
+      field: "googleReviewCount",
+      sourceType: "business_profile",
+      url: evidenceUrl,
+      quote: `${record.companyName} has ${record.googleReviewCount} Google reviews`
+    });
+    if (evidence) evidenceIds.push(evidence.id);
+  }
+
+  return evidenceIds;
+}
+
+async function createManualEvidence(params: {
+  campaignId: string;
+  companyId: string;
+  leadId: string;
+  field: string;
+  sourceType: string;
+  url: string;
+  quote: string;
+  metadata?: Prisma.InputJsonValue;
+}) {
+  const quote = normalizeWhitespace(params.quote).slice(0, 1500);
+  if (!quote) return null;
+
+  const existing = await prisma.evidence.findFirst({
+    where: {
+      campaignId: params.campaignId,
+      leadId: params.leadId,
+      field: params.field,
+      url: params.url,
+      quote
+    }
+  });
+  if (existing) return existing;
+
+  return prisma.evidence.create({
+    data: {
+      campaignId: params.campaignId,
+      companyId: params.companyId,
+      leadId: params.leadId,
+      field: params.field,
+      sourceType: params.sourceType,
+      retrievalMethod: "manual",
+      url: params.url,
+      finalUrl: params.url,
+      quote,
+      contentHash: hashText(quote),
+      metadata: params.metadata
+    }
+  });
+}
+
+async function createImportClaims(
+  campaignId: string,
+  companyId: string,
+  leadId: string,
+  record: ImportedLeadRecord,
+  evidenceIds: string[]
+) {
+  await upsertImportClaim({
+    campaignId,
+    companyId,
+    leadId,
+    field: "icp_fit",
+    value: true,
+    confidence: record.confidence ?? estimateImportConfidence(record),
+    evidenceIds
+  });
+
+  if (record.website) {
+    await upsertImportClaim({
+      campaignId,
+      companyId,
+      leadId,
+      field: "company_website",
+      value: record.website,
+      confidence: 0.9,
+      evidenceIds
+    });
+  }
+
+  if (record.emails[0]) {
+    await upsertImportClaim({
+      campaignId,
+      companyId,
+      leadId,
+      field: "public_email",
+      value: record.emails[0],
+      confidence: 0.85,
+      evidenceIds
+    });
+  }
+
+  const decisionMaker = mergePeople(record.owners, record.managers, record.decisionMakers)[0];
+  if (decisionMaker) {
+    await upsertImportClaim({
+      campaignId,
+      companyId,
+      leadId,
+      field: "owner_manager_name",
+      value: decisionMaker.name,
+      confidence: 0.85,
+      evidenceIds
+    });
+  }
+
+  if (typeof record.googleReviewCount === "number") {
+    await upsertImportClaim({
+      campaignId,
+      companyId,
+      leadId,
+      field: "googleReviewCount",
+      value: record.googleReviewCount,
+      confidence: 0.9,
+      evidenceIds
+    });
+  }
+}
+
+async function upsertImportClaim(params: {
+  campaignId: string;
+  companyId: string;
+  leadId: string;
+  field: string;
+  value: unknown;
+  confidence: number;
+  evidenceIds: string[];
+}) {
+  const existing = await prisma.claim.findFirst({
+    where: {
+      campaignId: params.campaignId,
+      leadId: params.leadId,
+      field: params.field,
+      promptName: "csv_import"
+    }
+  });
+  const data = {
+    companyId: params.companyId,
+    value: toInputJson(params.value),
+    confidence: Math.max(0, Math.min(1, params.confidence)),
+    evidenceIds: params.evidenceIds,
+    promptName: "csv_import",
+    promptVersion: "v1",
+    model: "manual_csv_import",
+    analysisVersion: "csv-import-v1"
+  };
+
+  if (existing) {
+    return prisma.claim.update({
+      where: { id: existing.id },
+      data
+    });
+  }
+
+  return prisma.claim.create({
+    data: {
+      campaignId: params.campaignId,
+      leadId: params.leadId,
+      field: params.field,
+      ...data
+    }
+  });
+}
+
+async function rerankCampaign(campaignId: string) {
+  const leads = await prisma.lead.findMany({
+    where: { campaignId, disqualified: false, status: "ranked" },
+    orderBy: [{ score: "desc" }, { confidence: "desc" }, { updatedAt: "asc" }]
+  });
+
+  await prisma.$transaction(
+    leads.map((lead, index) =>
+      prisma.lead.update({
+        where: { id: lead.id },
+        data: { rank: index + 1 }
+      })
+    )
+  );
+}
+
+async function refreshCampaignProgress(campaignId: string) {
+  const [campaign, discovered, researched, ranked, errors] = await Promise.all([
+    prisma.campaign.findUnique({ where: { id: campaignId } }),
+    prisma.lead.count({ where: { campaignId } }),
+    prisma.lead.count({ where: { campaignId, status: { in: ["researched", "ranked"] } } }),
+    prisma.lead.count({ where: { campaignId, rank: { not: null } } }),
+    prisma.sourceFailure.count({ where: { campaignId } })
+  ]);
+  if (!campaign) return;
+
+  const target = Math.max(1, campaign.targetLeadCount ?? Math.max(discovered, 25));
+  const weightedUnits = discovered * 0.2 + researched * 0.35 + ranked * 0.45;
+  const percent = Math.min(campaign.status === "completed" ? 100 : 99, Math.round((weightedUnits / target) * 100));
+
+  await prisma.campaign.update({
+    where: { id: campaignId },
+    data: {
+      progress: {
+        percent,
+        discovered,
+        researched,
+        ranked,
+        errors
+      },
+      events: {
+        create: {
+          type: "campaign_csv_imported",
+          message: `Imported ${ranked} ranked leads into the campaign database.`,
+          metadata: { source: "api" }
+        }
+      }
+    }
+  });
+}
+
 async function setSourceRecipeStatus(
   params: { recipeId: string },
   status: "trial" | "active" | "disabled",
@@ -1181,6 +1834,255 @@ function buildPrimaryQuery(plan: CampaignPlan): string {
   const geography = plan.geography.slice(0, 3).join(" ");
   const signal = plan.positiveSignals.slice(0, 2).join(" ");
   return [plan.icpDescription, geography, signal].filter(Boolean).join(" ");
+}
+
+function createCsvLookup(row: CsvRow): Map<string, string> {
+  const lookup = new Map<string, string>();
+  for (const [key, value] of Object.entries(row)) {
+    const normalizedKey = normalizeColumnKey(key);
+    const stringValue = String(value ?? "").trim();
+    if (normalizedKey && stringValue) lookup.set(normalizedKey, stringValue);
+  }
+  return lookup;
+}
+
+function pickCsvValue(lookup: Map<string, string>, aliases: string[]): string | undefined {
+  for (const alias of aliases) {
+    const value = lookup.get(normalizeColumnKey(alias));
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function normalizeColumnKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function normalizeCsvRow(row: CsvRow): CsvRow {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, String(value ?? "").trim()]));
+}
+
+function uniqueTrimmedStrings(values: Array<string | undefined | null>): string[] {
+  return [
+    ...new Set(
+      values
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value))
+    )
+  ];
+}
+
+function normalizeInputUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || /^(mailto|tel|javascript):/i.test(trimmed)) return undefined;
+
+  try {
+    const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    const parsed = new URL(withProtocol);
+    if (!["http:", "https:"].includes(parsed.protocol)) return undefined;
+    parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeDomain(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const url = normalizeInputUrl(value);
+  if (url) return domainFromUrl(url) ?? undefined;
+  const normalized = value.trim().toLowerCase().replace(/^www\./, "").replace(/\/.*$/, "");
+  return normalized.includes(".") ? normalized : undefined;
+}
+
+function domainFromUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL(value).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function isBusinessProfileUrl(value: string): boolean {
+  return isGoogleMapsUrl(value) || isBusinessProfileDomain(domainFromUrl(value) ?? "");
+}
+
+function isGoogleMapsUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    return (domain === "google.com" && parsed.pathname.startsWith("/maps")) || domain === "maps.google.com";
+  } catch {
+    return false;
+  }
+}
+
+function isBusinessProfileDomain(domain: string): boolean {
+  const normalized = domain.trim().toLowerCase().replace(/^www\./, "");
+  const profileDomains = [
+    "google.com",
+    "maps.google.com",
+    "bbb.org",
+    "chamberofcommerce.com",
+    "facebook.com",
+    "linkedin.com",
+    "manta.com",
+    "mapquest.com",
+    "nextdoor.com",
+    "yellowpages.com",
+    "yelp.com"
+  ];
+  return profileDomains.some((known) => normalized === known || normalized.endsWith(`.${known}`));
+}
+
+function inferImportSourceType(url: string, sourceName: string): string {
+  if (isBusinessProfileUrl(url) || /google\s*maps|business\s*profile/i.test(sourceName)) return "business_profile";
+  if (/career|jobs|employment/i.test(url)) return "careers_page";
+  if (/review/i.test(url)) return "review_page";
+  return "other_public_source";
+}
+
+function inferNameFromUrl(value: string | undefined): string | undefined {
+  const domain = domainFromUrl(value);
+  if (!domain || domain === "google.com" || domain === "maps.google.com") return undefined;
+  const stem = domain.split(".").slice(0, -1).join(" ");
+  const name = stem.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()).trim();
+  return name || undefined;
+}
+
+function inferStateFromLocation(parts: string[]): string | undefined {
+  if (parts.length >= 2) return parts[1];
+  const onlyPart = parts[0];
+  if (/^(il|illinois)$/i.test(onlyPart ?? "")) return onlyPart;
+  return undefined;
+}
+
+function extractEmailsFromText(text: string): string[] {
+  const matches = text.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi) ?? [];
+  return uniqueTrimmedStrings(matches.map((email) => email.toLowerCase())).filter((email) => {
+    if (email.includes("@example.") || email.includes("@domain.")) return false;
+    return !/\.(png|jpg|jpeg|gif|webp|svg)$/i.test(email);
+  });
+}
+
+function parsePeople(value: string | undefined, defaultRole: string): ImportedPerson[] {
+  if (!value) return [];
+  return uniqueTrimmedStrings(value.split(/\r?\n|[|;]/))
+    .map((item) => {
+      const email = extractEmailsFromText(item)[0];
+      let label = item.replace(email ?? "", "").replace(/[<>]/g, "").trim();
+      let role = defaultRole;
+      const dashMatch = label.match(/^(.+?)\s+-\s+(.+)$/);
+      const commaMatch = label.match(
+        /^(.+?),\s*(owner|manager|founder|president|ceo|principal|director|partner|operator|general manager|gm)\b/i
+      );
+      if (dashMatch) {
+        label = dashMatch[1]?.trim() ?? label;
+        role = dashMatch[2]?.trim() ?? role;
+      } else if (commaMatch) {
+        label = commaMatch[1]?.trim() ?? label;
+        role = commaMatch[2]?.trim() ?? role;
+      }
+
+      const name = label.replace(/\s+/g, " ").trim();
+      if (!name || name.includes("@") || name.length < 2) return null;
+      return {
+        name,
+        role,
+        ...(email ? { email } : {})
+      };
+    })
+    .filter((person): person is ImportedPerson => Boolean(person))
+    .slice(0, 20);
+}
+
+function mergeStringArrays(...arrays: string[][]): string[] {
+  return uniqueTrimmedStrings(arrays.flat());
+}
+
+function mergePeople(...arrays: Array<Array<{ name: string; role?: string; email?: string }>>): ImportedPerson[] {
+  const people = new Map<string, ImportedPerson>();
+  for (const person of arrays.flat()) {
+    const name = person.name.trim();
+    if (!name) continue;
+    const role = person.role?.trim() || "decision maker";
+    const email = person.email?.trim().toLowerCase();
+    const key = `${name.toLowerCase()}|${role.toLowerCase()}|${email ?? ""}`;
+    if (!people.has(key)) people.set(key, { name, role, ...(email ? { email } : {}) });
+  }
+  return [...people.values()].slice(0, 50);
+}
+
+function parseIntegerCell(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const match = value.replace(/,/g, "").match(/\d+/);
+  if (!match) return undefined;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseConfidenceCell(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value.replace("%", "").trim());
+  if (!Number.isFinite(parsed)) return undefined;
+  const confidence = parsed > 1 ? parsed / 100 : parsed;
+  return Math.max(0, Math.min(1, confidence));
+}
+
+function clampInteger(value: number | undefined, min: number, max: number): number | undefined {
+  if (typeof value !== "number") return undefined;
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function calculateImportedScore(record: ImportedLeadRecord): number {
+  let score = 35;
+  if (record.website) score += 15;
+  if (record.emails.length) score += 20;
+  if (record.owners.length || record.managers.length || record.decisionMakers.length) score += 20;
+  if ((record.googleReviewCount ?? 0) >= 50) score += 25;
+  else if (typeof record.googleReviewCount === "number") score += 10;
+  if (record.city || record.state || record.country) score += 5;
+  return Math.max(0, Math.min(100, score));
+}
+
+function estimateImportConfidence(record: ImportedLeadRecord): number {
+  let confidence = 0.72;
+  if (record.website || record.sourceUrl) confidence += 0.08;
+  if (record.emails.length) confidence += 0.05;
+  if (record.owners.length || record.managers.length || record.decisionMakers.length) confidence += 0.05;
+  if (typeof record.googleReviewCount === "number") confidence += 0.05;
+  return Math.max(0, Math.min(0.95, confidence));
+}
+
+function strongestImportedSignal(record: ImportedLeadRecord): string {
+  if ((record.googleReviewCount ?? 0) >= 50) return `${record.googleReviewCount} Google reviews`;
+  if (record.emails[0]) return `Published business email ${record.emails[0]}`;
+  const person = mergePeople(record.owners, record.managers, record.decisionMakers)[0];
+  if (person) return `${person.role}: ${person.name}`;
+  if (record.website) return `Company website ${record.website}`;
+  return "Imported verified public lead";
+}
+
+function readJsonObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function toInputJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
+}
+
+function normalizeCompanyName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function normalizeWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function readJsonStringArray(value: unknown): string[] {

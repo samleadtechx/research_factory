@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { prisma } from "@leadfactory/database";
+import { prisma, Prisma } from "@leadfactory/database";
 import { LocalDocumentStore } from "@leadfactory/document-store";
 import {
   createQueue,
@@ -34,6 +34,7 @@ type SearchResult = {
   sourceName?: string;
   sourceRecipeId?: string;
   sourceRecipeName?: string;
+  metadata?: Record<string, unknown>;
 };
 
 type PageSnapshot = {
@@ -207,6 +208,7 @@ async function discoverCandidates(job: Job<BrowserResearchPayload>) {
   const query = job.data.query ?? buildDiscoveryQuery(plan);
   const target = Math.min(campaign.targetLeadCount ?? 50, runtimeSettings.maxDiscoveryResults);
   const discoveryLimit = Math.max(target * 2, 25);
+  const constraints = buildSearchConstraints(plan, query);
   const [recipeResults, webSearchResults] = await Promise.all([
     runActiveSourceRecipes({
       campaignId: campaign.id,
@@ -215,14 +217,18 @@ async function discoverCandidates(job: Job<BrowserResearchPayload>) {
       limit: discoveryLimit,
       proxyStrategy: job.data.proxyStrategy
     }),
-    fetchSearchResults({
-      campaignId: campaign.id,
-      query,
-      limit: discoveryLimit,
-      proxyStrategy: job.data.proxyStrategy
-    })
+    plan.strictSourceRecipes
+      ? Promise.resolve([])
+      : fetchSearchResults({
+          campaignId: campaign.id,
+          query,
+          limit: discoveryLimit,
+          proxyStrategy: job.data.proxyStrategy
+        })
   ]);
-  const searchResults = dedupeSearchResults([...recipeResults, ...webSearchResults]);
+  const searchResults = dedupeSearchResults([...recipeResults, ...webSearchResults]).filter((result) =>
+    matchesSearchConstraints(result, constraints)
+  );
 
   let discovered = 0;
   for (const result of searchResults.slice(0, target * 2)) {
@@ -445,6 +451,7 @@ async function fetchSearchResults(params: {
   query: string;
   limit: number;
   proxyStrategy: BrowserResearchPayload["proxyStrategy"];
+  allowGoogleMapsResults?: boolean;
 }): Promise<SearchResult[]> {
   const searchUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(params.query)}`;
   const result = await withBrowserPage(
@@ -470,11 +477,13 @@ async function fetchSearchResults(params: {
         if (!normalized || !isUsefulPublicUrl(normalized)) continue;
         if (!anchor.text || anchor.text.length < 3) continue;
         const domain = domainFromUrl(normalized);
-        if (!domain || searchEngineDomains.has(domain)) continue;
+        if (!domain || (searchEngineDomains.has(domain) && !isGoogleMapsUrl(normalized))) continue;
+        if (isGoogleMapsUrl(normalized) && !params.allowGoogleMapsResults) continue;
         if (!deduped.has(normalized)) {
           deduped.set(normalized, {
             url: normalized,
-            title: cleanSearchTitle(anchor.text)
+            title: cleanSearchTitle(anchor.text),
+            metadata: extractSearchResultMetadata(anchor.text)
           });
         }
       }
@@ -494,20 +503,33 @@ async function runActiveSourceRecipes(params: {
   proxyStrategy: BrowserResearchPayload["proxyStrategy"];
 }): Promise<SearchResult[]> {
   const maxRecipes = runtimeSettings.maxActiveSourceRecipes;
+  if (maxRecipes <= 0) return [];
+  const pinnedIds = new Set(params.plan.sourceRecipeIds);
+  const pinnedNames = new Set(params.plan.sourceRecipeNames.map((name) => name.toLowerCase()));
+  const hasPinnedRecipes = pinnedIds.size > 0 || pinnedNames.size > 0;
   const recipes = await prisma.sourceRecipe.findMany({
-    where: {
-      OR: [
-        { status: "active", campaignId: null },
-        { status: "active", campaignId: params.campaignId },
-        { status: "trial", campaignId: params.campaignId }
-      ]
-    },
+    where: hasPinnedRecipes
+      ? {
+          status: { not: "disabled" },
+          OR: [
+            ...(pinnedIds.size ? [{ id: { in: [...pinnedIds] } }] : []),
+            ...[...pinnedNames].map((name) => ({ name: { equals: name, mode: "insensitive" as const } }))
+          ]
+        }
+      : {
+          OR: [
+            { status: "active", campaignId: null },
+            { status: "active", campaignId: params.campaignId },
+            { status: "trial", campaignId: params.campaignId }
+          ]
+        },
     orderBy: [{ successCount: "desc" }, { updatedAt: "desc" }],
-    take: Math.max(1, maxRecipes)
+    take: hasPinnedRecipes ? Math.min(200, Math.max(1, pinnedIds.size + pinnedNames.size)) : Math.max(1, maxRecipes)
   });
+  const selectedRecipes = hasPinnedRecipes ? recipes.filter((recipe) => isPinnedRecipe(recipe, pinnedIds, pinnedNames)) : recipes;
 
   const results: SearchResult[] = [];
-  for (const recipe of recipes) {
+  for (const recipe of selectedRecipes) {
     const parsed = SourceRecipeConfigSchema.safeParse(recipe.recipe);
     if (!parsed.success) {
       await markSourceRecipeFailure(recipe, "invalid_recipe");
@@ -557,7 +579,8 @@ async function runSourceRecipe(
       campaignId: params.campaignId,
       query,
       limit: Math.min(spec.limit, perRecipeLimit),
-      proxyStrategy: params.proxyStrategy
+      proxyStrategy: params.proxyStrategy,
+      allowGoogleMapsResults: recipeTargetsGoogleMaps(recipe, config)
     });
     results.push(
       ...found.map((result) => ({
@@ -807,6 +830,117 @@ async function markSourceRecipeFailure(recipe: SourceRecipeRecord, reason: strin
   );
 }
 
+function buildSearchConstraints(plan: CampaignPlan, query: string) {
+  const text = [
+    query,
+    plan.icpDescription,
+    ...plan.geography,
+    ...plan.positiveSignals,
+    ...plan.requiredEvidenceFields,
+    ...plan.sourceStrategy
+  ].join(" ");
+
+  return {
+    strictSourceRecipes: plan.strictSourceRecipes,
+    pinnedSourceRecipeIds: new Set(plan.sourceRecipeIds),
+    pinnedSourceRecipeNames: new Set(plan.sourceRecipeNames.map((name) => name.toLowerCase())),
+    requiresGoogleMaps: /google\s*maps|maps\.google|google\.com\/maps/i.test(text),
+    minimumGoogleReviewCount: extractMinimumGoogleReviewCount(text)
+  };
+}
+
+function matchesSearchConstraints(result: SearchResult, constraints: ReturnType<typeof buildSearchConstraints>): boolean {
+  const hasPinnedRecipes = constraints.pinnedSourceRecipeIds.size > 0 || constraints.pinnedSourceRecipeNames.size > 0;
+  if (constraints.strictSourceRecipes && hasPinnedRecipes) {
+    const recipeName = result.sourceRecipeName?.toLowerCase();
+    if (
+      !result.sourceRecipeId ||
+      (!constraints.pinnedSourceRecipeIds.has(result.sourceRecipeId) &&
+        (!recipeName || !constraints.pinnedSourceRecipeNames.has(recipeName)))
+    ) {
+      return false;
+    }
+  }
+
+  if (constraints.requiresGoogleMaps && !looksLikeGoogleMapsResult(result)) return false;
+
+  const reviewCount = readSearchResultReviewCount(result);
+  if (
+    typeof constraints.minimumGoogleReviewCount === "number" &&
+    typeof reviewCount === "number" &&
+    reviewCount < constraints.minimumGoogleReviewCount
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isPinnedRecipe(recipe: SourceRecipeRecord, ids: Set<string>, names: Set<string>): boolean {
+  return ids.has(recipe.id) || names.has(recipe.name.toLowerCase());
+}
+
+function recipeTargetsGoogleMaps(recipe: SourceRecipeRecord, config: SourceRecipeConfig): boolean {
+  const text = [
+    recipe.name,
+    ...recipe.supportedDomains,
+    config.description,
+    ...config.discoveryQueries,
+    ...config.seedUrls,
+    ...config.steps.map((step) => `${step.selector ?? ""} ${step.value ?? ""}`)
+  ].join(" ");
+  return /google\s*maps|maps\.google|google\.com\/maps/i.test(text);
+}
+
+function looksLikeGoogleMapsResult(result: SearchResult): boolean {
+  return (
+    isGoogleMapsUrl(result.url) ||
+    /google\s*maps|maps\.google|google\.com\/maps/i.test(
+      `${result.sourceName ?? ""} ${result.sourceRecipeName ?? ""} ${result.snippet ?? ""}`
+    )
+  );
+}
+
+function extractSearchResultMetadata(text: string): Record<string, unknown> {
+  const googleReviewCount = extractGoogleReviewCount(text);
+  return typeof googleReviewCount === "number" ? { googleReviewCount, reviewCount: googleReviewCount } : {};
+}
+
+function readSearchResultReviewCount(result: SearchResult): number | undefined {
+  const metadata = result.metadata ?? {};
+  const direct =
+    readNumericMetadata(metadata.googleReviewCount) ??
+    readNumericMetadata(metadata.reviewCount) ??
+    readNumericMetadata(metadata.google_reviews) ??
+    readNumericMetadata(metadata.reviews);
+  return direct ?? extractGoogleReviewCount(`${result.title} ${result.snippet ?? ""}`);
+}
+
+function readNumericMetadata(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") return parseLooseInteger(value);
+  return undefined;
+}
+
+function extractMinimumGoogleReviewCount(text: string): number | undefined {
+  const matches = [...text.matchAll(/(\d[\d,]*)\s*\+?\s*(?:google\s*)?reviews?\b/gi)]
+    .map((match) => parseLooseInteger(match[1]))
+    .filter((value): value is number => typeof value === "number");
+  if (!matches.length) return undefined;
+  return Math.max(...matches);
+}
+
+function extractGoogleReviewCount(text: string): number | undefined {
+  const explicit = text.match(/(\d[\d,]*)\s*\+?\s*(?:google\s*)?reviews?\b/i);
+  return explicit ? parseLooseInteger(explicit[1]) : undefined;
+}
+
+function parseLooseInteger(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value.replace(/,/g, "").match(/\d+/)?.[0]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function renderRecipeTemplate(template: string, plan: CampaignPlan, fallbackQuery: string): string {
   const values: Record<string, string> = {
     campaignName: plan.campaignName,
@@ -873,7 +1007,8 @@ function addRecipeAnchorResults(params: {
       snippet: `Found by ${params.recipe.name}@${params.recipe.version} from ${params.snapshot.title || params.snapshot.finalUrl}`,
       sourceName: "source_recipe",
       sourceRecipeId: params.recipe.id,
-      sourceRecipeName: params.recipe.name
+      sourceRecipeName: params.recipe.name,
+      metadata: extractSearchResultMetadata(`${anchor.text} ${params.snapshot.title} ${params.snapshot.text.slice(0, 1000)}`)
     });
   }
 }
@@ -892,7 +1027,8 @@ function addRecipeSnapshotResult(
     snippet: snapshot.text.slice(0, 280),
     sourceName: "source_recipe",
     sourceRecipeId: recipe.id,
-    sourceRecipeName: recipe.name
+    sourceRecipeName: recipe.name,
+    metadata: extractSearchResultMetadata(snapshot.text)
   });
 }
 
@@ -1061,7 +1197,7 @@ async function upsertCandidateFromSearch(campaignId: string, result: SearchResul
   const sourceDomain = domainFromUrl(result.url);
   if (!sourceDomain) return null;
 
-  const profileResult = isBusinessProfileDomain(sourceDomain);
+  const profileResult = isBusinessProfileDomain(sourceDomain) || isGoogleMapsUrl(result.url);
   const companyDomain = profileResult ? null : sourceDomain;
   const companyName = inferCompanyName(result.title, sourceDomain);
   const existingCompany = await prisma.company.findFirst({
@@ -1069,17 +1205,18 @@ async function upsertCandidateFromSearch(campaignId: string, result: SearchResul
       OR: [{ website: result.url }, ...(companyDomain ? [{ domain: companyDomain }] : [])]
     }
   });
-  const metadata = {
+  const metadata = toInputJson({
     discovery: {
       source: result.sourceName ?? "duckduckgo",
       sourceDomain,
       sourceRecipeId: result.sourceRecipeId,
       sourceRecipeName: result.sourceRecipeName,
+      resultMetadata: result.metadata ?? null,
       title: result.title,
       snippet: result.snippet,
       url: result.url
     }
-  };
+  });
   const company =
     existingCompany ??
     (await prisma.company.create({
@@ -1129,7 +1266,8 @@ async function upsertCandidateFromSearch(campaignId: string, result: SearchResul
     sourceType: result.sourceRecipeId ? "source_recipe_result" : "search_result",
     url: result.url,
     finalUrl: result.url,
-    quote: result.title
+    quote: result.title,
+    metadata: result.metadata ? toInputJson(result.metadata) : undefined
   });
 
   return {
@@ -1151,6 +1289,7 @@ async function createEvidence(params: {
   url: string;
   finalUrl?: string;
   quote: string;
+  metadata?: Prisma.InputJsonValue;
 }) {
   const quote = normalizeWhitespace(params.quote).slice(0, 1500);
   if (!quote) return null;
@@ -1178,7 +1317,8 @@ async function createEvidence(params: {
       url: params.url,
       finalUrl: params.finalUrl,
       quote,
-      contentHash: hashText(quote)
+      contentHash: hashText(quote),
+      metadata: params.metadata
     }
   });
 }
@@ -1405,6 +1545,9 @@ function parseCampaignPlan(value: unknown, prompt: string, campaignName: string)
     requiredEvidenceFields: ["public_email", "owner_manager_name", "company_website"],
     contactRequirements: ["company website emails", "public business profile emails", "public owner or manager names"],
     sourceStrategy: ["browser_search", "company_website"],
+    sourceRecipeIds: [],
+    sourceRecipeNames: [],
+    strictSourceRecipes: false,
     scoringRules: [],
     maxPagesPerLead: 10,
     outputColumns: ["rank", "company", "website", "score", "email", "decision_maker", "evidence"],
@@ -1560,9 +1703,19 @@ function isUsefulPublicUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
     const domain = parsed.hostname.replace(/^www\./, "");
-    if (searchEngineDomains.has(domain)) return false;
+    if (searchEngineDomains.has(domain) && !isGoogleMapsUrl(value)) return false;
     if (/\.(css|gif|ico|jpeg|jpg|js|json|mp4|pdf|png|svg|webp|xml)$/i.test(parsed.pathname)) return false;
     return ["http:", "https:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function isGoogleMapsUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    const domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+    return (domain === "google.com" && parsed.pathname.startsWith("/maps")) || domain === "maps.google.com";
   } catch {
     return false;
   }
@@ -1659,6 +1812,10 @@ function normalizeWhitespace(value: string): string {
 
 function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function toInputJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
 }
 
 function resolveStorageDir(value: string): string {

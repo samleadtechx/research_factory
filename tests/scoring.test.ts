@@ -58,4 +58,38 @@ describe("lead scoring", () => {
     expect(result.components).toHaveLength(1);
     expect(result.rejectedRuleIds).toEqual(["owner_identified"]);
   });
+
+  it("matches reviewCount claims to googleReviewCount scoring rules", () => {
+    const result = scoreClaims({
+      claims: [
+        {
+          id: "claim_reviews",
+          field: "reviewCount",
+          value: 73,
+          confidence: 0.9,
+          evidenceIds: ["ev_reviews"],
+          promptName: "source_recipe",
+          promptVersion: "v1",
+          model: "manual",
+          analysisVersion: "v1",
+          createdAt: new Date().toISOString()
+        }
+      ],
+      rules: [
+        {
+          id: "google_reviews_50_plus",
+          label: "50+ Google reviews",
+          field: "googleReviewCount",
+          operator: "gte",
+          value: 50,
+          points: 20,
+          requiredConfidence: 0.8,
+          requiresEvidence: true
+        }
+      ]
+    });
+
+    expect(result.score).toBe(20);
+    expect(result.rejectedRuleIds).toEqual([]);
+  });
 });

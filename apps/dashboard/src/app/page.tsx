@@ -394,7 +394,7 @@ Option B - CLI:
 ${codexCliCommand}
 
 After it connects, tell Codex:
-Use the lead-research-factory MCP server as the control plane. Check system_health, system_stats, and get_runtime_settings first, then create and manage lead research campaigns through MCP tools.`;
+Use the lead-research-factory MCP server as the control plane. Check system_health, system_stats, and get_runtime_settings first, then create and manage lead research campaigns through MCP tools. If you create a campaign-specific source recipe, pass its id/name to create_campaign with strictSourceRecipes=true. If you scrape verified rows outside the queue, import them with import_campaign_csv so they appear in the dashboard.`;
 }
 
 function buildCodexInstructions(publicAppUrl: string, mcpApiBaseUrl: string, remoteMcpUrl: string): string {
@@ -415,16 +415,19 @@ Normal workflow:
 6. Inspect reusable providers with list_source_recipes, list_enrichment_providers, and list_email_verification_providers before creating new ones.
 7. When a source needs custom browser handling, start Camoufox with start_debug_browser and inspect it with debug_browser_snapshot/open/click/type/extract/screenshot.
 8. Convert the debug trail into a source recipe draft with debug_browser_recipe_draft, then save it with create_source_recipe.
-9. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Store reusable provider credentials in provider templates or server secrets.
-10. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
-11. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
-12. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
-13. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
+9. If that recipe is campaign-specific, create the campaign with sourceRecipeIds/sourceRecipeNames and strictSourceRecipes=true.
+10. If you collect verified rows with a direct/debug scrape, call import_campaign_csv to put them into the campaign database.
+11. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Store reusable provider credentials in provider templates or server secrets.
+12. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
+13. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
+14. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
+15. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
 
 Currently wired MCP tools:
 - get_runtime_settings
 - update_runtime_settings
 - create_campaign
+- import_campaign_csv
 - create_source_recipe
 - list_source_recipes
 - get_source_recipe

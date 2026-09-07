@@ -163,7 +163,17 @@ export const CreateCampaignInputSchema = z.object({
   prompt: z.string().trim().min(3),
   name: z.string().trim().min(1).max(160).optional(),
   targetLeadCount: z.number().int().min(1).max(100000).optional(),
-  serverUsagePercent: z.number().int().min(1).max(100).optional()
+  serverUsagePercent: z.number().int().min(1).max(100).optional(),
+  sourceRecipeIds: z.array(z.string().trim().min(1)).max(100).optional(),
+  sourceRecipeNames: z.array(z.string().trim().min(1)).max(100).optional(),
+  strictSourceRecipes: z.boolean().optional()
+});
+
+export const ImportCampaignCsvInputSchema = z.object({
+  csvText: z.string().min(1),
+  sourceName: z.string().trim().min(1).max(160).default("manual_csv_import"),
+  sourceUrl: z.string().trim().min(1).max(1000).optional(),
+  markRanked: z.boolean().default(true)
 });
 
 export const ScoringRuleSchema = z.object({
@@ -199,6 +209,9 @@ export const CampaignPlanSchema = z.object({
     "public owner or manager names"
   ]),
   sourceStrategy: z.array(z.string().min(1)).default([]),
+  sourceRecipeIds: z.array(z.string().trim().min(1)).max(100).default([]),
+  sourceRecipeNames: z.array(z.string().trim().min(1)).max(100).default([]),
+  strictSourceRecipes: z.boolean().default(false),
   scoringRules: z.array(ScoringRuleSchema).default([]),
   maxPagesPerLead: z.number().int().min(1).max(500).default(25),
   outputColumns: z.array(z.string().min(1)).default([]),
@@ -302,6 +315,7 @@ export type CampaignStatus = z.infer<typeof CampaignStatusSchema>;
 export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type CampaignPlan = z.infer<typeof CampaignPlanSchema>;
 export type CreateCampaignInput = z.infer<typeof CreateCampaignInputSchema>;
+export type ImportCampaignCsvInput = z.infer<typeof ImportCampaignCsvInputSchema>;
 export type ScoringRule = z.infer<typeof ScoringRuleSchema>;
 export type ProxyInput = z.infer<typeof ProxyInputSchema>;
 export type ServerSettings = z.infer<typeof ServerSettingsSchema>;

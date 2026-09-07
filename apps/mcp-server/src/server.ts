@@ -8,7 +8,7 @@ export type LeadResearchMcpServerOptions = {
 
 const defaultApiBaseUrl = "http://localhost:4000";
 const leadResearchMcpInstructions =
-  "Use Lead Research Factory as the control plane for lead generation. Check runtime settings, system health, and capacity before campaigns. Create campaigns from the user's ICP prompt, use strict public evidence, reuse active source/enrichment/email-verification providers, and use Camoufox debug browser tools only when a source needs custom handling. Do not guess owners, emails, or fit; mark unknown or blocked when evidence is weak. If Google /sorry, CAPTCHA, or other challenge pages appear, record the source as blocked and rotate/skip instead of trying to solve the challenge.";
+  "Use Lead Research Factory as the control plane for lead generation. Check runtime settings, system health, and capacity before campaigns. Create campaigns from the user's ICP prompt, use strict public evidence, reuse active source/enrichment/email-verification providers, and use Camoufox debug browser tools only when a source needs custom handling. When you create a campaign-specific source recipe, pass its id/name to create_campaign with strictSourceRecipes=true so broad global sources do not pollute the campaign. If you scrape verified rows outside the queue, import them with import_campaign_csv so they appear in the dashboard. Do not guess owners, emails, or fit; mark unknown or blocked when evidence is weak. If Google /sorry, CAPTCHA, or other challenge pages appear, record the source as blocked and rotate/skip instead of trying to solve the challenge.";
 
 const sourceRecipeStepInputSchema = z.object({
   action: z.enum([
@@ -131,15 +131,39 @@ server.registerTool(
   "create_campaign",
   {
     title: "Create Campaign",
-    description: "Create and immediately queue a prompt-driven lead research campaign.",
+    description:
+      "Create and immediately queue a prompt-driven lead research campaign. Pass sourceRecipeIds/sourceRecipeNames with strictSourceRecipes=true when a custom provider recipe must be the only discovery source.",
     inputSchema: {
       prompt: z.string().min(3),
       name: z.string().optional(),
       targetLeadCount: z.number().int().positive().optional(),
-      serverUsagePercent: z.number().int().min(1).max(100).optional()
+      serverUsagePercent: z.number().int().min(1).max(100).optional(),
+      sourceRecipeIds: z.array(z.string().min(1)).optional(),
+      sourceRecipeNames: z.array(z.string().min(1)).optional(),
+      strictSourceRecipes: z.boolean().optional()
     }
   },
   async (input) => jsonResult(await postJson("/campaigns", input))
+);
+
+server.registerTool(
+  "import_campaign_csv",
+  {
+    title: "Import Campaign CSV",
+    description:
+      "Import a verified CSV scrape into one campaign so the dashboard panel shows those leads, evidence, ranks, and export rows.",
+    inputSchema: {
+      campaignId: z.string().min(1),
+      csvText: z.string().min(1),
+      sourceName: z.string().min(1).max(160).optional(),
+      sourceUrl: z.string().min(1).max(1000).optional(),
+      markRanked: z.boolean().optional()
+    }
+  },
+  async (input) => {
+    const { campaignId, ...body } = input;
+    return jsonResult(await postJson(`/campaigns/${encodeURIComponent(campaignId)}/import-csv`, body));
+  }
 );
 
 server.registerTool(

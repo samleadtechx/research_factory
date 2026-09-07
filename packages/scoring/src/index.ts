@@ -15,7 +15,7 @@ export function scoreClaims(params: {
   const rejectedRuleIds: string[] = [];
 
   for (const rule of params.rules) {
-    const claim = params.claims.find((candidate) => candidate.field === rule.field);
+    const claim = params.claims.find((candidate) => fieldsMatch(candidate.field, rule.field));
     if (!claim || claim.confidence < rule.requiredConfidence) {
       rejectedRuleIds.push(rule.id);
       continue;
@@ -45,6 +45,30 @@ export function scoreClaims(params: {
   const score = typeof params.cap === "number" ? Math.min(params.cap, rawScore) : rawScore;
 
   return { score, components, rejectedRuleIds };
+}
+
+function fieldsMatch(claimField: string, ruleField: string): boolean {
+  if (claimField === ruleField) return true;
+  const claimAliases = fieldAliases(claimField);
+  const ruleAliases = fieldAliases(ruleField);
+  return claimAliases.some((alias) => ruleAliases.includes(alias));
+}
+
+function fieldAliases(field: string): string[] {
+  const normalized = field.replace(/[^a-z0-9]+/gi, "").toLowerCase();
+  if (
+    [
+      "googlereviewcount",
+      "googlereviews",
+      "googlereviewscount",
+      "reviewcount",
+      "reviewscount",
+      "reviews"
+    ].includes(normalized)
+  ) {
+    return ["googlereviewcount", "reviewcount", "reviews"];
+  }
+  return [normalized];
 }
 
 function matchesRule(value: unknown, rule: ScoringRule): boolean {

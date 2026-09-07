@@ -53,6 +53,9 @@ Required JSON shape:
   "requiredEvidenceFields": ["company_website", "public_email", "owner_manager_name"],
   "contactRequirements": ["company website emails", "public business profile emails", "public owner or manager names"],
   "sourceStrategy": ["browser_search", "company_website", "business_profile"],
+  "sourceRecipeIds": [],
+  "sourceRecipeNames": [],
+  "strictSourceRecipes": false,
   "scoringRules": [],
   "maxPagesPerLead": 25,
   "outputColumns": ["rank", "company", "website", "score", "email", "decision_maker", "evidence"],
@@ -92,6 +95,9 @@ export function createFallbackCampaignPlan(params: {
       "public owner or manager names"
     ],
     sourceStrategy: ["browser_search", "company_website", "business_profile"],
+    sourceRecipeIds: [],
+    sourceRecipeNames: [],
+    strictSourceRecipes: false,
     scoringRules: [
       {
         id: "public_fit_evidence",
