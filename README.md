@@ -34,6 +34,7 @@ bash scripts/status.sh
 10. Analysis workers run active enrichment providers, ask Qwen to analyze saved source text into strict claims, verify public emails, and update scores.
 11. The deterministic scorer ranks leads with evidence.
 12. Monitor campaigns, data providers, and export CSV from the dashboard or MCP.
+13. Export ranked public-email leads to Sendread campaigns or AB test lists after a dry run.
 
 ## MCP
 
@@ -85,6 +86,11 @@ Main tools:
 - `get_runtime_settings`
 - `update_runtime_settings`
 - `create_campaign`
+- `import_campaign_csv`
+- `list_sendread_campaigns`
+- `list_sendread_ab_test_lists`
+- `list_sendread_ab_test_list_leads`
+- `export_campaign_to_sendread`
 - `create_source_recipe`
 - `list_source_recipes`
 - `get_source_recipe`
@@ -137,6 +143,13 @@ Camoufox is available for Codex-driven debug browser sessions and defaults to a
 virtual Linux display in Docker.
 
 Stored campaign documents live under `data/documents`.
+
+## Sendread
+
+Set `Sendread URL` and `Sendread API Key` in Runtime Settings. The default URL is
+`https://app.sendread.co`. Use the Sendread Export panel or MCP tools to list
+destinations, dry-run a campaign export, then push ranked leads with public
+emails into a Sendread campaign or AB test list.
 
 Manual Camoufox inspector:
 

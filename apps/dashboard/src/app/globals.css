@@ -508,6 +508,12 @@ input[type="range"] {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.sendreadGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(140px, 0.7fr) minmax(260px, 1.6fr) minmax(120px, 0.6fr) minmax(180px, 1fr);
+}
+
 .runtimeField,
 .runtimeToggle {
   display: grid;
@@ -926,6 +932,7 @@ th {
   .moduleGrid,
   .providerSummaryGrid,
   .runtimeGrid,
+  .sendreadGrid,
   .proxyUploadGrid {
     grid-template-columns: 1fr;
   }

@@ -82,6 +82,8 @@ export const RuntimeSettingsSchema = ServerSettingsSchema.extend({
   localLlmModel: z.string().trim().min(1).default("qwen2.5:14b"),
   localLlmApiKey: z.string().default("local"),
   mcpBearerToken: z.string().default(""),
+  sendreadBaseUrl: z.string().trim().min(1).default("https://app.sendread.co"),
+  sendreadApiKey: z.string().default(""),
   appStorageDir: z.string().trim().min(1).default("./data"),
   maxDiscoveryResults: z.number().int().min(1).max(100000).default(80),
   searchRetryCount: z.number().int().min(0).max(10).default(2),
@@ -120,6 +122,8 @@ export const RuntimeSettingsUpdateSchema = z.object({
   localLlmModel: z.string().trim().min(1).optional(),
   localLlmApiKey: z.string().optional(),
   mcpBearerToken: z.string().optional(),
+  sendreadBaseUrl: z.string().trim().min(1).optional(),
+  sendreadApiKey: z.string().optional(),
   appStorageDir: z.string().trim().min(1).optional(),
   serverUsagePercent: z.number().int().min(1).max(100).optional(),
   maxBrowsersHardCap: z.number().int().min(1).max(200).optional(),
@@ -174,6 +178,19 @@ export const ImportCampaignCsvInputSchema = z.object({
   sourceName: z.string().trim().min(1).max(160).default("manual_csv_import"),
   sourceUrl: z.string().trim().min(1).max(1000).optional(),
   markRanked: z.boolean().default(true)
+});
+
+export const SendreadDestinationTypeSchema = z.enum(["campaign", "ab_test_list"]);
+
+export const SendreadExportInputSchema = z.object({
+  destinationType: SendreadDestinationTypeSchema.default("campaign"),
+  destinationId: z.string().trim().min(1),
+  limit: z.number().int().min(1).max(10000).default(1000),
+  minScore: z.number().int().min(0).max(100).default(0),
+  includeUnranked: z.boolean().default(false),
+  onlyWithEmail: z.boolean().default(true),
+  tags: z.string().trim().max(500).optional(),
+  dryRun: z.boolean().default(false)
 });
 
 export const ScoringRuleSchema = z.object({
@@ -316,6 +333,8 @@ export type JobStatus = z.infer<typeof JobStatusSchema>;
 export type CampaignPlan = z.infer<typeof CampaignPlanSchema>;
 export type CreateCampaignInput = z.infer<typeof CreateCampaignInputSchema>;
 export type ImportCampaignCsvInput = z.infer<typeof ImportCampaignCsvInputSchema>;
+export type SendreadDestinationType = z.infer<typeof SendreadDestinationTypeSchema>;
+export type SendreadExportInput = z.infer<typeof SendreadExportInputSchema>;
 export type ScoringRule = z.infer<typeof ScoringRuleSchema>;
 export type ProxyInput = z.infer<typeof ProxyInputSchema>;
 export type ServerSettings = z.infer<typeof ServerSettingsSchema>;

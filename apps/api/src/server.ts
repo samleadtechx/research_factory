@@ -30,9 +30,12 @@ import {
   ImportCampaignCsvInputSchema,
   ProxyUploadSchema,
   RuntimeSettingsUpdateSchema,
+  SendreadExportInputSchema,
   type CampaignPlan,
   type CreateCampaignInput,
-  type ImportCampaignCsvInput
+  type ImportCampaignCsvInput,
+  type SendreadDestinationType,
+  type SendreadExportInput
 } from "@leadfactory/schemas";
 import {
   CreateEmailVerificationProviderInputSchema,
@@ -54,6 +57,14 @@ const api = Fastify({
     level: process.env.LOG_LEVEL ?? "info"
   }
 });
+const maskedSecret = "********";
+
+class SendreadApiError extends Error {
+  constructor(readonly statusCode: number, message: string, readonly body?: unknown) {
+    super(message);
+  }
+}
+
 const rootDir = fileURLToPath(new URL("../../..", import.meta.url));
 const debugBrowsers = createDebugBrowserController({
   rootDir,
@@ -74,6 +85,15 @@ api.setErrorHandler((error, _request, reply) => {
     reply.status(400).send({
       error: "validation_error",
       issues: error.issues
+    });
+    return;
+  }
+
+  if (error instanceof SendreadApiError) {
+    reply.status(error.statusCode).send({
+      error: "sendread_error",
+      message: error.message,
+      body: error.body
     });
     return;
   }
@@ -101,15 +121,15 @@ api.get("/settings/defaults", async () => defaultRuntimeSettings());
 
 api.get("/settings/runtime", async () => {
   return {
-    settings: await readRuntimeSettings(),
+    settings: maskRuntimeSecrets(await readRuntimeSettings()),
     defaults: defaultRuntimeSettings()
   };
 });
 
 api.post("/settings/runtime", async (request) => {
-  const input = RuntimeSettingsUpdateSchema.parse(request.body ?? {});
+  const input = RuntimeSettingsUpdateSchema.parse(preserveMaskedRuntimeSecrets(request.body ?? {}));
   return {
-    settings: await updateRuntimeSettings(input),
+    settings: maskRuntimeSecrets(await updateRuntimeSettings(input)),
     defaults: defaultRuntimeSettings()
   };
 });
@@ -129,7 +149,7 @@ api.get("/system/capacity", async () => {
     qwenHealthy: true
   });
 
-  return { capacity, limits, settings };
+  return { capacity, limits, settings: maskRuntimeSecrets(settings) };
 });
 
 api.get("/system/health", async () => {
@@ -778,6 +798,77 @@ api.get("/campaigns/:campaignId/export.csv", async (request, reply) => {
   ]);
 });
 
+api.get("/sendread/campaigns", async () => {
+  return sendreadRequest("/api/public/campaigns");
+});
+
+api.get("/sendread/ab-test-lists", async () => {
+  return sendreadRequest("/api/public/ab-test-lists");
+});
+
+api.get("/sendread/ab-test-lists/:listId/leads", async (request) => {
+  const { listId } = request.params as { listId: string };
+  return sendreadRequest(`/api/public/ab-test-lists/${encodeURIComponent(listId)}/leads`);
+});
+
+api.post("/campaigns/:campaignId/sendread/export", async (request, reply) => {
+  const { campaignId } = request.params as { campaignId: string };
+  const input = SendreadExportInputSchema.parse(request.body ?? {});
+  const campaign = await prisma.campaign.findUnique({ where: { id: campaignId } });
+  if (!campaign) return reply.status(404).send({ error: "campaign_not_found" });
+
+  const leads = await buildSendreadLeads(campaignId, campaign.name, input);
+  if (!input.dryRun && leads.payload.length === 0) {
+    return reply.status(409).send({
+      error: "no_exportable_leads",
+      message: "No leads with public emails matched the export filters.",
+      skippedNoEmail: leads.skippedNoEmail
+    });
+  }
+
+  if (input.dryRun) {
+    return {
+      campaignId,
+      destinationType: input.destinationType,
+      destinationId: input.destinationId,
+      dryRun: true,
+      selected: leads.payload.length,
+      skippedNoEmail: leads.skippedNoEmail,
+      leads: leads.payload.slice(0, 25)
+    };
+  }
+
+  const endpoint = sendreadLeadPushPath(input.destinationType, input.destinationId);
+  const response = await sendreadRequest(endpoint, {
+    method: "POST",
+    body: { leads: leads.payload }
+  });
+
+  await prisma.campaignEvent.create({
+    data: {
+      campaignId,
+      type: "sendread_exported",
+      message: `Exported ${leads.payload.length} leads to Sendread ${input.destinationType}.`,
+      metadata: toInputJson({
+        destinationType: input.destinationType,
+        destinationId: input.destinationId,
+        selected: leads.payload.length,
+        skippedNoEmail: leads.skippedNoEmail,
+        response
+      })
+    }
+  });
+
+  return {
+    campaignId,
+    destinationType: input.destinationType,
+    destinationId: input.destinationId,
+    exported: leads.payload.length,
+    skippedNoEmail: leads.skippedNoEmail,
+    response
+  };
+});
+
 api.post("/proxies/parse", async (request) => {
   const body = ProxyUploadSchema.parse(request.body);
   const parsed = parseProxyText(body.text ?? "");
@@ -973,6 +1064,22 @@ function normalizeProgress(value: unknown): ReturnType<typeof emptyProgress> {
     ranked: Number(progress.ranked ?? 0),
     errors: Number(progress.errors ?? 0)
   };
+}
+
+function maskRuntimeSecrets(settings: Awaited<ReturnType<typeof readRuntimeSettings>>) {
+  return {
+    ...settings,
+    sendreadApiKey: settings.sendreadApiKey ? maskedSecret : ""
+  };
+}
+
+function preserveMaskedRuntimeSecrets(body: unknown) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const patch = { ...(body as Record<string, unknown>) };
+  if (patch.sendreadApiKey === maskedSecret) {
+    delete patch.sendreadApiKey;
+  }
+  return patch;
 }
 
 type CsvRow = Record<string, string>;
@@ -1586,6 +1693,175 @@ async function refreshCampaignProgress(campaignId: string) {
       }
     }
   });
+}
+
+type SendreadLeadPayload = {
+  email: string;
+  firstName?: string;
+  company?: string;
+  city?: string;
+  phone?: string;
+  website?: string;
+  industry?: string;
+  facebook?: string;
+  linkedin?: string;
+  tags?: string;
+  custom1?: string;
+  custom2?: string;
+  custom3?: string;
+  custom4?: string;
+  custom5?: string;
+};
+
+async function sendreadRequest(
+  path: string,
+  options: { method?: "GET" | "POST"; body?: unknown } = {}
+): Promise<unknown> {
+  const settings = await readRuntimeSettings();
+  if (!settings.sendreadApiKey.trim()) {
+    throw new SendreadApiError(409, "Sendread API key is missing. Add it in Runtime Settings first.");
+  }
+
+  const baseUrl = settings.sendreadBaseUrl.replace(/\/+$/, "");
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: options.method ?? "GET",
+    headers: {
+      authorization: `Bearer ${settings.sendreadApiKey}`,
+      ...(options.body ? { "content-type": "application/json" } : {})
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const text = await response.text();
+  const body = parseJsonResponse(text);
+  if (!response.ok) {
+    throw new SendreadApiError(response.status, `Sendread HTTP ${response.status}`, body);
+  }
+  return body;
+}
+
+function sendreadLeadPushPath(type: SendreadDestinationType, destinationId: string): string {
+  const encodedId = encodeURIComponent(destinationId);
+  return type === "ab_test_list"
+    ? `/api/public/ab-test-lists/${encodedId}/leads`
+    : `/api/public/campaigns/${encodedId}/leads`;
+}
+
+async function buildSendreadLeads(campaignId: string, campaignName: string, input: SendreadExportInput) {
+  const leads = await prisma.lead.findMany({
+    where: {
+      campaignId,
+      disqualified: false,
+      score: { gte: input.minScore },
+      ...(input.includeUnranked ? {} : { rank: { not: null } })
+    },
+    include: {
+      company: true,
+      evidence: {
+        take: 10,
+        orderBy: { retrievedAt: "desc" }
+      }
+    },
+    orderBy: [{ rank: "asc" }, { score: "desc" }, { confidence: "desc" }, { updatedAt: "desc" }],
+    take: input.limit
+  });
+  const payload: SendreadLeadPayload[] = [];
+  let skippedNoEmail = 0;
+
+  for (const lead of leads) {
+    const company = lead.company;
+    if (!company) continue;
+    const emails = readJsonStringArray(company.emails);
+    const email = normalizeEmail(company.generalEmail) ?? emails.map(normalizeEmail).find(Boolean);
+    if (!email) {
+      skippedNoEmail += 1;
+      if (input.onlyWithEmail) continue;
+    }
+
+    if (!email) continue;
+    const people = mergePeople(readJsonPeople(company.owners), readJsonPeople(company.managers));
+    const primaryPerson = people[0];
+    const social = findSocialLinks(lead.evidence.map((evidence) => evidence.url));
+    const location = [company.city, company.state, company.country].filter(Boolean).join(", ");
+    payload.push(
+      compactObject({
+        email,
+        firstName: firstName(primaryPerson?.name),
+        company: company.companyName,
+        city: company.city ?? undefined,
+        phone: company.phone ?? undefined,
+        website: company.website ?? undefined,
+        industry: inferIndustry(campaignName, company.metadata),
+        facebook: social.facebook,
+        linkedin: social.linkedin,
+        tags: input.tags || `leadfactory,${slugifyTag(campaignName)}`,
+        custom1: `Factory score ${lead.score}`,
+        custom2: lead.rank ? `Rank ${lead.rank}` : undefined,
+        custom3: lead.strongestSignal ?? undefined,
+        custom4: location || undefined,
+        custom5: lead.evidence.map((evidence) => evidence.url).filter(Boolean).slice(0, 3).join(" | ") || undefined
+      })
+    );
+  }
+
+  return { payload, skippedNoEmail };
+}
+
+function parseJsonResponse(text: string): unknown {
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function normalizeEmail(value: string | null | undefined): string | undefined {
+  const email = value?.trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return undefined;
+  return email;
+}
+
+function firstName(value: string | undefined): string | undefined {
+  const first = value?.trim().split(/\s+/)[0];
+  return first || undefined;
+}
+
+function findSocialLinks(urls: string[]): { facebook?: string; linkedin?: string } {
+  const facebook = urls.find((url) => /(^|\.)facebook\.com/i.test(domainFromUrl(url) ?? ""));
+  const linkedin = urls.find((url) => /(^|\.)linkedin\.com/i.test(domainFromUrl(url) ?? ""));
+  return {
+    facebook,
+    linkedin
+  };
+}
+
+function inferIndustry(campaignName: string, metadata: unknown): string | undefined {
+  const source = `${campaignName} ${JSON.stringify(metadata ?? {})}`.toLowerCase();
+  const industries = [
+    "hvac",
+    "plumbing",
+    "roofing",
+    "electrical",
+    "restoration",
+    "landscaping",
+    "construction",
+    "real estate",
+    "insurance",
+    "legal",
+    "medical",
+    "dental"
+  ];
+  return industries.find((industry) => source.includes(industry));
+}
+
+function slugifyTag(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "campaign";
+}
+
+function compactObject<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== null && entry !== "")
+  ) as T;
 }
 
 async function setSourceRecipeStatus(

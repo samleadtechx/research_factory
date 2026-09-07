@@ -8,7 +8,7 @@ export type LeadResearchMcpServerOptions = {
 
 const defaultApiBaseUrl = "http://localhost:4000";
 const leadResearchMcpInstructions =
-  "Use Lead Research Factory as the control plane for lead generation. Check runtime settings, system health, and capacity before campaigns. Create campaigns from the user's ICP prompt, use strict public evidence, reuse active source/enrichment/email-verification providers, and use Camoufox debug browser tools only when a source needs custom handling. When you create a campaign-specific source recipe, pass its id/name to create_campaign with strictSourceRecipes=true so broad global sources do not pollute the campaign. If you scrape verified rows outside the queue, import them with import_campaign_csv so they appear in the dashboard. Do not guess owners, emails, or fit; mark unknown or blocked when evidence is weak. If Google /sorry, CAPTCHA, or other challenge pages appear, record the source as blocked and rotate/skip instead of trying to solve the challenge.";
+  "Use Lead Research Factory as the control plane for lead generation. Check runtime settings, system health, and capacity before campaigns. Create campaigns from the user's ICP prompt, use strict public evidence, reuse active source/enrichment/email-verification providers, and use Camoufox debug browser tools only when a source needs custom handling. When you create a campaign-specific source recipe, pass its id/name to create_campaign with strictSourceRecipes=true so broad global sources do not pollute the campaign. If you scrape verified rows outside the queue, import them with import_campaign_csv so they appear in the dashboard. For cold email exports, list Sendread destinations first, run export_campaign_to_sendread with dryRun=true, then push only ranked leads with public emails when the user approves. Do not guess owners, emails, or fit; mark unknown or blocked when evidence is weak. If Google /sorry, CAPTCHA, or other challenge pages appear, record the source as blocked and rotate/skip instead of trying to solve the challenge.";
 
 const sourceRecipeStepInputSchema = z.object({
   action: z.enum([
@@ -73,6 +73,8 @@ const runtimeSettingsInputSchema = z
     localLlmModel: z.string().min(1),
     localLlmApiKey: z.string(),
     mcpBearerToken: z.string(),
+    sendreadBaseUrl: z.string().min(1),
+    sendreadApiKey: z.string(),
     appStorageDir: z.string().min(1),
     serverUsagePercent: z.number().int().min(1).max(100),
     maxBrowsersHardCap: z.number().int().min(1).max(200),
@@ -511,6 +513,62 @@ server.registerTool(
       downloadUrl: `${publicApiBaseUrl}${path}`,
       csv
     });
+  }
+);
+
+server.registerTool(
+  "list_sendread_campaigns",
+  {
+    title: "List Sendread Campaigns",
+    description: "List Sendread cold email campaigns available for lead export.",
+    inputSchema: {}
+  },
+  async () => jsonResult(await getJson("/sendread/campaigns"))
+);
+
+server.registerTool(
+  "list_sendread_ab_test_lists",
+  {
+    title: "List Sendread AB Test Lists",
+    description: "List Sendread AB test lists available for lead export.",
+    inputSchema: {}
+  },
+  async () => jsonResult(await getJson("/sendread/ab-test-lists"))
+);
+
+server.registerTool(
+  "list_sendread_ab_test_list_leads",
+  {
+    title: "List Sendread AB Test List Leads",
+    description: "List leads already present in one Sendread AB test list.",
+    inputSchema: {
+      listId: z.string().min(1)
+    }
+  },
+  async (input) => jsonResult(await getJson(`/sendread/ab-test-lists/${encodeURIComponent(input.listId)}/leads`))
+);
+
+server.registerTool(
+  "export_campaign_to_sendread",
+  {
+    title: "Export Campaign To Sendread",
+    description:
+      "Push ranked Factory leads with public emails into a Sendread campaign or AB test list.",
+    inputSchema: {
+      campaignId: z.string().min(1),
+      destinationType: z.enum(["campaign", "ab_test_list"]).optional(),
+      destinationId: z.string().min(1),
+      limit: z.number().int().min(1).max(10000).optional(),
+      minScore: z.number().int().min(0).max(100).optional(),
+      includeUnranked: z.boolean().optional(),
+      onlyWithEmail: z.boolean().optional(),
+      tags: z.string().max(500).optional(),
+      dryRun: z.boolean().optional()
+    }
+  },
+  async (input) => {
+    const { campaignId, ...body } = input;
+    return jsonResult(await postJson(`/campaigns/${encodeURIComponent(campaignId)}/sendread/export`, body));
   }
 );
 

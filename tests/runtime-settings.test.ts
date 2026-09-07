@@ -9,6 +9,8 @@ describe("runtime settings schema", () => {
     expect(settings.localLlmBaseUrl).toBe("http://73.72.215.253:11434/v1");
     expect(settings.localLlmModel).toBe("qwen2.5:14b");
     expect(settings.mcpBearerToken).toBe("");
+    expect(settings.sendreadBaseUrl).toBe("https://app.sendread.co");
+    expect(settings.sendreadApiKey).toBe("");
     expect(settings.appStorageDir).toBe("./data");
     expect(settings.browserEngine).toBe("camoufox");
     expect(settings.debugBrowserHeadless).toBe("virtual");
@@ -18,6 +20,7 @@ describe("runtime settings schema", () => {
     const update = RuntimeSettingsUpdateSchema.parse({
       redisUrl: "redis://redis:6379",
       mcpBearerToken: "secret-token",
+      sendreadApiKey: "srk_test",
       serverUsagePercent: 70,
       browserEngine: "playwright",
       browserFirst: false,
@@ -27,6 +30,7 @@ describe("runtime settings schema", () => {
     expect(update).toEqual({
       redisUrl: "redis://redis:6379",
       mcpBearerToken: "secret-token",
+      sendreadApiKey: "srk_test",
       serverUsagePercent: 70,
       browserEngine: "playwright",
       browserFirst: false,

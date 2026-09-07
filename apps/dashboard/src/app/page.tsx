@@ -12,6 +12,7 @@ import {
   Pause,
   Play,
   RefreshCw,
+  Send,
   Server,
   Settings,
   Square,
@@ -152,6 +153,8 @@ type RuntimeSettings = {
   localLlmModel: string;
   localLlmApiKey: string;
   mcpBearerToken: string;
+  sendreadBaseUrl: string;
+  sendreadApiKey: string;
   appStorageDir: string;
   serverUsagePercent: number;
   maxBrowsersHardCap: number;
@@ -189,6 +192,26 @@ type RuntimeSettings = {
   debugBrowserNavigationTimeoutMs: number;
   debugBrowserConnectTimeoutMs: number;
   debugBrowserMaxTextChars: number;
+};
+
+type SendreadDestinationType = "campaign" | "ab_test_list";
+
+type SendreadDestination = {
+  id: string;
+  name: string;
+  raw: Record<string, unknown>;
+};
+
+type SendreadExportResponse = {
+  campaignId: string;
+  destinationType: SendreadDestinationType;
+  destinationId: string;
+  dryRun?: boolean;
+  selected?: number;
+  exported?: number;
+  skippedNoEmail?: number;
+  leads?: unknown[];
+  response?: unknown;
 };
 
 type RuntimeSettingsResponse = {
@@ -394,7 +417,7 @@ Option B - CLI:
 ${codexCliCommand}
 
 After it connects, tell Codex:
-Use the lead-research-factory MCP server as the control plane. Check system_health, system_stats, and get_runtime_settings first, then create and manage lead research campaigns through MCP tools. If you create a campaign-specific source recipe, pass its id/name to create_campaign with strictSourceRecipes=true. If you scrape verified rows outside the queue, import them with import_campaign_csv so they appear in the dashboard.`;
+Use the lead-research-factory MCP server as the control plane. Check system_health, system_stats, and get_runtime_settings first, then create and manage lead research campaigns through MCP tools. If you create a campaign-specific source recipe, pass its id/name to create_campaign with strictSourceRecipes=true. If you scrape verified rows outside the queue, import them with import_campaign_csv so they appear in the dashboard. For Sendread, list destinations and dry-run export_campaign_to_sendread before pushing leads.`;
 }
 
 function buildCodexInstructions(publicAppUrl: string, mcpApiBaseUrl: string, remoteMcpUrl: string): string {
@@ -420,14 +443,19 @@ Normal workflow:
 11. When an HTTP API can enrich company/contact data, save it with create_enrichment_provider. Store reusable provider credentials in provider templates or server secrets.
 12. When an HTTP API can verify discovered emails, save it with create_email_verification_provider. Map response fields so workers can mark valid/risky/invalid emails.
 13. Reuse active providers before creating new ones. Use trial providers for one campaign, and global active providers when reusable.
-14. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
-15. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
+14. For Sendread exports, list destinations with list_sendread_campaigns or list_sendread_ab_test_lists, run export_campaign_to_sendread with dryRun=true, then push only ranked public-email leads after approval.
+15. Inspect leads, evidence, provider runs, and weak fields before presenting recommendations.
+16. Pause, resume, cancel, audit, rerun analysis, and export through MCP when those tools are available.
 
 Currently wired MCP tools:
 - get_runtime_settings
 - update_runtime_settings
 - create_campaign
 - import_campaign_csv
+- list_sendread_campaigns
+- list_sendread_ab_test_lists
+- list_sendread_ab_test_list_leads
+- export_campaign_to_sendread
 - create_source_recipe
 - list_source_recipes
 - get_source_recipe
@@ -575,6 +603,15 @@ export default function DashboardPage() {
   const [leads, setLeads] = useState<LeadSummary[]>([]);
   const [leadError, setLeadError] = useState<string | null>(null);
   const [isRefreshingLeads, setIsRefreshingLeads] = useState(false);
+  const [sendreadDestinationType, setSendreadDestinationType] = useState<SendreadDestinationType>("campaign");
+  const [sendreadDestinations, setSendreadDestinations] = useState<SendreadDestination[]>([]);
+  const [sendreadDestinationId, setSendreadDestinationId] = useState("");
+  const [sendreadMinScore, setSendreadMinScore] = useState(0);
+  const [sendreadTags, setSendreadTags] = useState("leadfactory");
+  const [sendreadResult, setSendreadResult] = useState<string | null>(null);
+  const [sendreadError, setSendreadError] = useState<string | null>(null);
+  const [isLoadingSendread, setIsLoadingSendread] = useState(false);
+  const [isExportingSendread, setIsExportingSendread] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [publicAppUrl, setPublicAppUrl] = useState(defaultPublicAppUrl);
   const [isPublicAppUrlLoaded, setIsPublicAppUrlLoaded] = useState(false);
@@ -746,6 +783,60 @@ export default function DashboardPage() {
       return;
     }
     await refreshCampaigns();
+  }
+
+  async function refreshSendreadDestinations(type = sendreadDestinationType) {
+    setIsLoadingSendread(true);
+    setSendreadError(null);
+    setSendreadResult(null);
+    try {
+      const endpoint = type === "ab_test_list" ? "ab-test-lists" : "campaigns";
+      const response = await fetch(`${apiBaseUrl}/sendread/${endpoint}`);
+      if (!response.ok) throw new Error(await response.text());
+      const destinations = readSendreadDestinations(await response.json());
+      setSendreadDestinations(destinations);
+      setSendreadDestinationId((current) =>
+        current && destinations.some((destination) => destination.id === current) ? current : destinations[0]?.id ?? ""
+      );
+      setSendreadResult(`${destinations.length} Sendread ${type === "ab_test_list" ? "AB lists" : "campaigns"} loaded`);
+    } catch (caught) {
+      setSendreadDestinations([]);
+      setSendreadDestinationId("");
+      setSendreadError(caught instanceof Error ? caught.message : "Sendread destinations failed to load");
+    } finally {
+      setIsLoadingSendread(false);
+    }
+  }
+
+  async function exportToSendread(dryRun: boolean) {
+    if (!selectedCampaignId || !sendreadDestinationId) return;
+    setIsExportingSendread(true);
+    setSendreadError(null);
+    setSendreadResult(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/campaigns/${selectedCampaignId}/sendread/export`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          destinationType: sendreadDestinationType,
+          destinationId: sendreadDestinationId,
+          minScore: sendreadMinScore,
+          tags: sendreadTags,
+          dryRun
+        })
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as SendreadExportResponse;
+      setSendreadResult(
+        dryRun
+          ? `${payload.selected ?? 0} leads ready, ${payload.skippedNoEmail ?? 0} skipped without email`
+          : `${payload.exported ?? 0} leads pushed, ${payload.skippedNoEmail ?? 0} skipped without email`
+      );
+    } catch (caught) {
+      setSendreadError(caught instanceof Error ? caught.message : "Sendread export failed");
+    } finally {
+      setIsExportingSendread(false);
+    }
   }
 
   async function copyText(value: string, target: string) {
@@ -1111,6 +1202,81 @@ export default function DashboardPage() {
         </table>
       </section>
 
+      <section className="tablePanel sendreadPanel">
+        <div className="panelHeader">
+          <div>
+            <h2>Sendread Export</h2>
+            <span>{runtimeSettings?.sendreadApiKey ? "API key saved" : "Add Sendread key in Runtime Settings"}</span>
+          </div>
+          <div className="copyActions">
+            <button className="copyButton" onClick={() => void refreshSendreadDestinations()} disabled={isLoadingSendread}>
+              <RefreshCw size={16} />
+              <span>{isLoadingSendread ? "Loading" : "Load"}</span>
+            </button>
+            <button
+              className="copyButton"
+              onClick={() => void exportToSendread(true)}
+              disabled={!selectedCampaignId || !sendreadDestinationId || isExportingSendread}
+            >
+              <Eye size={16} />
+              <span>Dry Run</span>
+            </button>
+            <button
+              className="copyButton primaryCopy"
+              onClick={() => void exportToSendread(false)}
+              disabled={!selectedCampaignId || !sendreadDestinationId || isExportingSendread}
+            >
+              <Send size={16} />
+              <span>{isExportingSendread ? "Pushing" : "Push Leads"}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="sendreadGrid">
+          <label className="runtimeField">
+            <span>Destination Type</span>
+            <select
+              value={sendreadDestinationType}
+              onChange={(event) => {
+                const next = event.target.value as SendreadDestinationType;
+                setSendreadDestinationType(next);
+                setSendreadDestinations([]);
+                setSendreadDestinationId("");
+                setSendreadResult(null);
+                setSendreadError(null);
+              }}
+            >
+              <option value="campaign">Campaign</option>
+              <option value="ab_test_list">AB Test List</option>
+            </select>
+          </label>
+          <label className="runtimeField">
+            <span>Destination</span>
+            <select value={sendreadDestinationId} onChange={(event) => setSendreadDestinationId(event.target.value)}>
+              <option value="">Load destinations first</option>
+              {sendreadDestinations.map((destination) => (
+                <option key={destination.id} value={destination.id}>
+                  {destination.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <RuntimeNumberInput
+            label="Min Score"
+            value={sendreadMinScore}
+            onChange={setSendreadMinScore}
+          />
+          <RuntimeTextInput
+            label="Tags"
+            value={sendreadTags}
+            onChange={setSendreadTags}
+          />
+        </div>
+
+        {sendreadError ? <pre className="error">{sendreadError}</pre> : null}
+        {sendreadResult ? <span className="successText">{sendreadResult}</span> : null}
+      </section>
+
       <section className="settingsSection" id="settings">
         <div className="panelHeader">
           <h2>MCP Settings</h2>
@@ -1246,6 +1412,17 @@ export default function DashboardPage() {
                     value={runtimeSettings.mcpBearerToken}
                     type="password"
                     onChange={(value) => updateRuntimeSetting("mcpBearerToken", value)}
+                  />
+                  <RuntimeTextInput
+                    label="Sendread URL"
+                    value={runtimeSettings.sendreadBaseUrl}
+                    onChange={(value) => updateRuntimeSetting("sendreadBaseUrl", value)}
+                  />
+                  <RuntimeTextInput
+                    label="Sendread API Key"
+                    value={runtimeSettings.sendreadApiKey}
+                    type="password"
+                    onChange={(value) => updateRuntimeSetting("sendreadApiKey", value)}
                   />
                   <RuntimeTextInput
                     label="Storage Dir"
@@ -1953,6 +2130,40 @@ function formatPeople(people: Person[]): string {
     .slice(0, 6)
     .map((person) => `${person.name}${person.role ? ` (${person.role})` : ""}${person.email ? ` <${person.email}>` : ""}`)
     .join(", ");
+}
+
+function readSendreadDestinations(payload: unknown): SendreadDestination[] {
+  const rows = Array.isArray(payload)
+    ? payload
+    : payload && typeof payload === "object"
+      ? readDestinationRows(payload as Record<string, unknown>)
+      : [];
+
+  return rows
+    .map((row) => {
+      if (!row || typeof row !== "object") return null;
+      const record = row as Record<string, unknown>;
+      const id = String(record.id ?? record._id ?? record.campaignId ?? record.listId ?? "").trim();
+      if (!id) return null;
+      const name = String(
+        record.name ??
+          record.title ??
+          record.campaignName ??
+          record.listName ??
+          record.subject ??
+          id
+      ).trim();
+      return { id, name, raw: record };
+    })
+    .filter((row): row is SendreadDestination => Boolean(row));
+}
+
+function readDestinationRows(payload: Record<string, unknown>): unknown[] {
+  const candidates = [payload.campaigns, payload.lists, payload.abTestLists, payload.ab_test_lists, payload.data, payload.items, payload.results];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
 }
 
 function combineProviderSummaries(summaries: ProviderListSummary[]): ProviderListSummary {
